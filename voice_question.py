@@ -8,10 +8,11 @@ def speak_question(text):
     def _speak():
         try:
             filename = f"temp_{uuid.uuid4()}.mp3"
-            tts = gTTS(text=text, lang="en")
+            tts = gTTS(text=text, lang="en", slow=False)
             tts.save(filename)
+            time.sleep(0.3)  # small buffer before playing
             os.startfile(filename)
-            time.sleep(len(text) * 0.075 + 2)
+            time.sleep(max(len(text) * 0.08, 4))  # wait longer
             try:
                 os.unlink(filename)
             except Exception:
@@ -21,4 +22,4 @@ def speak_question(text):
 
     thread = threading.Thread(target=_speak, daemon=True)
     thread.start()
-    thread.join(timeout=15)
+    thread.join(timeout=20)  # increased timeout

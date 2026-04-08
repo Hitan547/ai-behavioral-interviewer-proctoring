@@ -8,7 +8,6 @@ Changes vs previous version:
 - WAV file NOT deleted immediately — voice scorer reads it first
 - demo_app.py deletes WAV after voice scoring is complete
 """
-
 import sounddevice as sd
 import scipy.io.wavfile as wav
 import whisper
@@ -20,12 +19,10 @@ import os
 model = whisper.load_model("small")
 
 _SAMPLE_RATE    = 16000
-_SILENCE_RMS    = 0.01
+_SILENCE_RMS    = 0.003
 _VAD_FRAME_MS   = 30
-_VAD_RMS_THRESH = 0.008
-_MIN_SPEECH_SEC = 1.5
-
-
+_VAD_RMS_THRESH = 0.004
+_MIN_SPEECH_SEC = 0.8
 def _trim_silence(audio: np.ndarray, fs: int) -> np.ndarray:
     frame_len = int(fs * _VAD_FRAME_MS / 1000)
     frames    = [audio[i:i+frame_len] for i in range(0, len(audio), frame_len)]
@@ -102,7 +99,7 @@ def record_answer_background(container: dict, duration: int = 60):
                 tmp_path,
                 language="en",
                 fp16=False,
-                no_speech_threshold=0.5,
+                no_speech_threshold=0.3,
                 condition_on_previous_text=False,
                 temperature=0.0,
             )
