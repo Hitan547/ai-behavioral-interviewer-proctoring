@@ -24,7 +24,7 @@ openai-whisper==20250625
 sounddevice==0.5.5
 scipy==1.15.3
 librosa==0.11.0
-opencv-python==4.11.0
+opencv-python
 
 # Data
 numpy==1.26.4
