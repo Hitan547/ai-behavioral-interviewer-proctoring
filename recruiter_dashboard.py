@@ -3,6 +3,7 @@ recruiter_dashboard.py — Simplified & Reliable
 Primary section navigation is horizontal in the main area; sidebar holds account tools.
 """
 
+import html
 import io
 import json
 import streamlit as st
@@ -271,6 +272,49 @@ def show_recruiter_dashboard():
     section.main [data-baseweb="radio"] label {
       color: #1a1f36 !important;
     }
+
+    /* Primary content uses stMain — not always section.main; theme can leave invisible text */
+    [data-testid="stMain"] {
+      color: #111827 !important;
+    }
+    [data-testid="stMain"] [data-testid="stMarkdownContainer"],
+    [data-testid="stMain"] [data-testid="stMarkdownContainer"] p,
+    [data-testid="stMain"] [data-testid="stMarkdownContainer"] span,
+    [data-testid="stMain"] [data-testid="stMarkdownContainer"] strong,
+    [data-testid="stMain"] [data-testid="stMarkdownContainer"] em,
+    [data-testid="stMain"] [data-testid="stMarkdownContainer"] code {
+      color: #111827 !important;
+    }
+    [data-testid="stMain"] [data-testid="stCaption"],
+    [data-testid="stMain"] [data-testid="stCaption"] p,
+    [data-testid="stMain"] div[data-testid="stCaption"] {
+      color: #374151 !important;
+    }
+    [data-testid="stMain"] [data-testid="stExpander"] p,
+    [data-testid="stMain"] [data-testid="stExpander"] li,
+    [data-testid="stMain"] [data-testid="stExpander"] summary {
+      color: #111827 !important;
+    }
+    [data-testid="stVerticalBlockBorderWrapper"] p,
+    [data-testid="stVerticalBlockBorderWrapper"] [data-testid="stMarkdownContainer"] p,
+    [data-testid="stVerticalBlockBorderWrapper"] [data-testid="stMarkdownContainer"] span,
+    [data-testid="stVerticalBlockBorderWrapper"] [data-testid="stCaption"],
+    [data-testid="stVerticalBlockBorderWrapper"] [data-testid="stCaption"] p {
+      color: #111827 !important;
+    }
+    [data-testid="stVerticalBlockBorderWrapper"] [data-testid="stCaption"] {
+      color: #374151 !important;
+    }
+    [data-testid="stMain"] [data-baseweb="select"] div[role="combobox"],
+    [data-testid="stMain"] [data-baseweb="select"] span {
+      color: #111827 !important;
+    }
+    [data-testid="stMain"] h1,
+    [data-testid="stMain"] h2,
+    [data-testid="stMain"] h3 {
+      color: #111827 !important;
+    }
+
     .ps-topbar {
         background: linear-gradient(120deg, #185FA5 0%, #1D9E75 100%);
         padding: 14px 24px; border-radius: 12px; margin-bottom: 16px;
@@ -458,7 +502,11 @@ def _show_overview():
     if sort_by in sort_map:
         filtered.sort(key=sort_map[sort_by])
 
-    st.markdown(f"**{len(filtered)} candidate(s)**")
+    st.markdown(
+        f'<p style="color:#111827;font-weight:600;font-size:15px;margin:0 0 10px 0">'
+        f"{len(filtered)} candidate(s)</p>",
+        unsafe_allow_html=True,
+    )
 
     STATUS_ICON = {"Pending": "🕐", "Shortlisted": "⭐", "Rejected": "❌"}
     BADGE_CLASS = {"Strong Advance": "vb-green", "Advance": "vb-blue",
@@ -474,16 +522,40 @@ def _show_overview():
 
         with st.container(border=True):
             c1, c2, c3, c4, c5, c6, c7 = st.columns([2.5, 0.8, 0.7, 0.7, 0.7, 1.2, 1.0])
+            nm = html.escape(s.candidate_name or "")
+            un = html.escape(s.username or "—")
+            stt = html.escape(s.status or "")
             c1.markdown(
-                f"**{s.candidate_name}**  \n`{s.username or '—'}` · {si} {s.status}")
-            c2.markdown(f"{emoji} **{sc}**")
-            c3.caption(f"🧠 {round(s.cognitive_score or 0, 1)}")
-            c4.caption(f"😊 {round(s.emotion_score or 0, 1)}")
-            c5.caption(f"👁 {round(s.engagement_score or 0, 1)}")
+                f'<p style="color:#111827;margin:0;line-height:1.45">'
+                f"<strong>{nm}</strong><br/>"
+                f'<code style="color:#334155;background:#f1f5f9;padding:2px 6px;border-radius:4px;font-size:12px">{un}</code>'
+                f' <span style="color:#374151">· {si} {stt}</span></p>',
+                unsafe_allow_html=True,
+            )
+            c2.markdown(
+                f'<p style="color:#111827;margin:0;font-size:15px">{emoji} <strong>{sc}</strong></p>',
+                unsafe_allow_html=True,
+            )
+            c3.markdown(
+                f'<p style="color:#374151;font-size:13px;margin:0">🧠 {round(s.cognitive_score or 0, 1)}</p>',
+                unsafe_allow_html=True,
+            )
+            c4.markdown(
+                f'<p style="color:#374151;font-size:13px;margin:0">😊 {round(s.emotion_score or 0, 1)}</p>',
+                unsafe_allow_html=True,
+            )
+            c5.markdown(
+                f'<p style="color:#374151;font-size:13px;margin:0">👁 {round(s.engagement_score or 0, 1)}</p>',
+                unsafe_allow_html=True,
+            )
             c6.markdown(
                 f'<span class="vbadge {bc}">{_verdict_badge(verdict)}</span>',
                 unsafe_allow_html=True)
-            c7.caption(s.created_at.strftime("%d %b %Y"))
+            c7.markdown(
+                f'<p style="color:#374151;font-size:12px;margin:0">'
+                f"{html.escape(s.created_at.strftime('%d %b %Y'))}</p>",
+                unsafe_allow_html=True,
+            )
 
             b1, b2, b3 = st.columns([1.5, 1, 1])
             with b1:
