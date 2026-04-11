@@ -244,9 +244,6 @@ def show_recruiter_dashboard():
       -webkit-text-fill-color: #1a1f36 !important;
     }
 
-    section.main {
-      color: #1a1f36 !important;
-    }
     section.main [data-testid="stMarkdownContainer"] p,
     section.main [data-testid="stMarkdownContainer"] span,
     section.main [data-testid="stMarkdownContainer"] strong,
@@ -273,10 +270,7 @@ def show_recruiter_dashboard():
       color: #1a1f36 !important;
     }
 
-    /* Primary content uses stMain — not always section.main; theme can leave invisible text */
-    [data-testid="stMain"] {
-      color: #111827 !important;
-    }
+    /* Primary content uses stMain — do NOT set color on stMain root (breaks primary button labels) */
     [data-testid="stMain"] [data-testid="stMarkdownContainer"],
     [data-testid="stMain"] [data-testid="stMarkdownContainer"] p,
     [data-testid="stMain"] [data-testid="stMarkdownContainer"] span,
@@ -313,6 +307,30 @@ def show_recruiter_dashboard():
     [data-testid="stMain"] h2,
     [data-testid="stMain"] h3 {
       color: #111827 !important;
+    }
+
+    /* Jobs / forms: primary buttons must stay white-on-dark (Analyse Resumes, etc.) */
+    [data-testid="stMain"] .stButton > button[kind="primary"],
+    [data-testid="stMain"] button[kind="primary"],
+    [data-testid="stMain"] .stFormSubmitButton > button[kind="primary"],
+    [data-testid="stMain"] [data-testid="stFormSubmitButton"] button[kind="primary"] {
+      color: #ffffff !important;
+      -webkit-text-fill-color: #ffffff !important;
+    }
+    [data-testid="stMain"] .stButton > button[kind="primary"] p,
+    [data-testid="stMain"] .stButton > button[kind="primary"] span,
+    [data-testid="stMain"] button[kind="primary"] p,
+    [data-testid="stMain"] button[kind="primary"] span {
+      color: #ffffff !important;
+      -webkit-text-fill-color: #ffffff !important;
+    }
+    /* st.tabs (Job Postings) */
+    [data-testid="stMain"] [data-baseweb="tab"] {
+      color: #4b5563 !important;
+    }
+    [data-testid="stMain"] [data-baseweb="tab"][aria-selected="true"] {
+      color: #111827 !important;
+      font-weight: 600 !important;
     }
 
     .ps-topbar {
