@@ -215,10 +215,62 @@ def show_recruiter_dashboard():
     st.markdown("""
     <style>
     @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;600;700&display=swap');
-    html, body, [class*="css"] { font-family: 'DM Sans', sans-serif !important; }
-    .stApp { background: #F0F4F8 !important; }
+    html, body { font-family: 'DM Sans', sans-serif !important; }
+    .stApp {
+      background: #F0F4F8 !important;
+      --stTextColor: #1a1f36 !important;
+      --stHeadingColor: #111827 !important;
+    }
     #MainMenu, footer, header { visibility: hidden; }
 
+    /* Force readable text on light backgrounds (overrides dark theme tokens) */
+    [data-testid="stSidebar"] {
+      color: #1a1f36 !important;
+    }
+    [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p,
+    [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] span,
+    [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] strong,
+    [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] code {
+      color: #1a1f36 !important;
+    }
+    [data-testid="stSidebar"] [data-testid="stCaption"],
+    [data-testid="stSidebar"] label,
+    [data-testid="stSidebar"] small {
+      color: #4b5563 !important;
+    }
+    [data-testid="stSidebar"] .stTextInput input {
+      color: #1a1f36 !important;
+      -webkit-text-fill-color: #1a1f36 !important;
+    }
+
+    section.main {
+      color: #1a1f36 !important;
+    }
+    section.main [data-testid="stMarkdownContainer"] p,
+    section.main [data-testid="stMarkdownContainer"] span,
+    section.main [data-testid="stMarkdownContainer"] strong,
+    section.main [data-testid="stMarkdownContainer"] li,
+    section.main [data-testid="stMarkdownContainer"] code {
+      color: #1a1f36 !important;
+    }
+    section.main [data-testid="stCaption"] {
+      color: #4b5563 !important;
+    }
+    section.main [data-baseweb="select"] span,
+    section.main [data-baseweb="input"] input {
+      color: #1a1f36 !important;
+    }
+    section.main [data-testid="stExpander"] p,
+    section.main [data-testid="stExpander"] li,
+    section.main [data-testid="stExpander"] summary {
+      color: #1a1f36 !important;
+    }
+    section.main .stRadio [data-testid="stMarkdownContainer"] p,
+    section.main .stRadio label,
+    section.main [role="radiogroup"] label,
+    section.main [data-baseweb="radio"] label {
+      color: #1a1f36 !important;
+    }
     .ps-topbar {
         background: linear-gradient(120deg, #185FA5 0%, #1D9E75 100%);
         padding: 14px 24px; border-radius: 12px; margin-bottom: 16px;
@@ -232,6 +284,7 @@ def show_recruiter_dashboard():
     }
     [data-testid="stMetricValue"] > div {
         font-size: 24px !important; font-weight: 700 !important;
+        color: #111827 !important;
     }
     [data-testid="stMetricLabel"] > div {
         font-size: 11px !important; font-weight: 600 !important;
