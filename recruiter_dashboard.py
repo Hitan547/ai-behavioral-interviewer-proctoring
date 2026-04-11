@@ -203,6 +203,11 @@ def generate_candidate_pdf(session_id: int) -> bytes:
 RECRUITER_NAV_OPTIONS = ["📋 Candidates", "💼 Jobs", "👥 Students", "📈 Analytics"]
 
 
+def _recruiter_logout():
+    st.session_state.clear()
+    st.rerun()
+
+
 def show_recruiter_dashboard():
     if "recruiter_nav" not in st.session_state:
         st.session_state.recruiter_nav = "📋 Candidates"
@@ -250,16 +255,17 @@ def show_recruiter_dashboard():
     </style>
     """, unsafe_allow_html=True)
 
-    # ── SIDEBAR — account & billing (primary nav is horizontal in main area)
+    # ── SIDEBAR — plan/usage before logout; single log out at bottom
     with st.sidebar:
         st.markdown("## 🏢 PsySense")
+        st.caption(f"@{st.session_state.auth_username}")
         st.markdown("---")
         if st.session_state.get("recruiter_detail_id"):
-            if st.button("← Back to List", use_container_width=True):
+            if st.button("← Back to List", use_container_width=True, key="sb_back_list"):
                 st.session_state.recruiter_detail_id = None
                 st.rerun()
 
-        st.markdown("**📧 Notification Email**")
+        st.markdown("**📧 Notification email**")
         from database import SessionLocal, User
         _db = SessionLocal()
         try:
@@ -273,7 +279,7 @@ def show_recruiter_dashboard():
                                   placeholder="you@email.com",
                                   key="recruiter_email_input",
                                   label_visibility="collapsed")
-        if st.button("💾 Save Email", use_container_width=True, key="save_email_btn"):
+        if st.button("💾 Save email", use_container_width=True, key="save_email_btn"):
             _db2 = SessionLocal()
             try:
                 _u = _db2.query(User).filter_by(
@@ -285,30 +291,36 @@ def show_recruiter_dashboard():
             finally:
                 _db2.close()
 
-        st.markdown("---")
-        if st.button("🚪 Sign Out", use_container_width=True, key="sidebar_logout"):
-            st.session_state.clear()
-            st.rerun()
-
         if st.session_state.get("org_id"):
             from saas.saas_auth import show_saas_billing_sidebar
             show_saas_billing_sidebar(st.session_state.org_id)
 
-    # ── TOP BAR ──
-    col_title, col_logout = st.columns([6, 1])
-    with col_title:
-        st.markdown("""
-        <div class="ps-topbar">
-            <h2>🏢 PsySense — Recruiter Intelligence Dashboard</h2>
-            <p>AI-powered interview analysis platform</p>
-        </div>
-        """, unsafe_allow_html=True)
-    with col_logout:
-        st.markdown("<div style='padding-top:8px'>", unsafe_allow_html=True)
-        if st.button("🚪 Logout", key="top_logout", use_container_width=True):
-            st.session_state.clear()
-            st.rerun()
-        st.markdown("</div>", unsafe_allow_html=True)
+        st.markdown("---")
+        if st.button("🚪 Log out", use_container_width=True, key="sidebar_logout"):
+            _recruiter_logout()
+
+    # ── TOP BAR (full width) ──
+    st.markdown("""
+    <div class="ps-topbar">
+        <h2>🏢 PsySense — Recruiter Intelligence Dashboard</h2>
+        <p>AI-powered interview analysis platform</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    _org = st.session_state.get("org_id")
+    if st.session_state.get("show_billing_page") and not _org:
+        st.session_state.show_billing_page = False
+    if st.session_state.get("show_billing_page") and _org:
+        b1, b2 = st.columns([1, 4])
+        with b1:
+            if st.button("← Back to dashboard", key="billing_back"):
+                st.session_state.show_billing_page = False
+                st.rerun()
+        with b2:
+            st.caption("Manage your subscription and usage.")
+        from saas.saas_billing import show_billing_page
+        show_billing_page(_org)
+        return
 
     _idx = (
         RECRUITER_NAV_OPTIONS.index(st.session_state.recruiter_nav)
