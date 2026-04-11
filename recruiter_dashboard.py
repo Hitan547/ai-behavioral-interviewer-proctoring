@@ -1,25 +1,12 @@
 """
-recruiter_dashboard.py (Enhanced)
----------------------------------
-Recruiter-only view with:
-- Top-tier dashboard design with premium aesthetics
-- Prominent logout button in header
-- PDF download for all candidates
-- Integrated recruiter insights from insight_engine
-- Better filtering, sorting, and UI/UX
-- Advanced analytics
-
-Run with:
-    streamlit run app.py
-    (when role == "recruiter")
+recruiter_dashboard.py — Simplified & Reliable
+Primary section navigation is horizontal in the main area; sidebar holds account tools.
 """
 
 import io
 import json
 import streamlit as st
 import plotly.graph_objects as go
-from datetime import datetime
-
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -27,999 +14,645 @@ from reportlab.lib.units import mm
 from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable,
 )
-
 from database import (
     get_all_sessions, get_session_by_id,
     update_candidate_status, save_recruiter_notes, get_all_users
 )
 
-# ═══════════════════════════════════════════════════════════════════════════
-# CONFIGURATION & THEMING
-# ═══════════════════════════════════════════════════════════════════════════
-
-# Premium color palette
-COLORS = {
-    "primary":      "#1D9E75",      # Forest green
-    "secondary":    "#185FA5",      # Deep blue
-    "accent":       "#E8A020",      # Gold/amber
-    "danger":       "#CC2222",      # Red
-    "success":      "#1D9E75",      # Green
-    "info":         "#4C9ED9",      # Light blue
-    "background":   "#F8FAFB",      # Off-white
-    "surface":      "#FFFFFF",      # White
-    "border":       "#E0E4E8",      # Light gray
-    "text_dark":    "#1A1F36",      # Dark text
-    "text_light":   "#6B7280",      # Light text
+# ─────────────────────────────────────────────
+# COLORS
+# ─────────────────────────────────────────────
+C = {
+    "primary":   "#1D9E75",
+    "secondary": "#185FA5",
+    "accent":    "#E8A020",
+    "danger":    "#CC2222",
+    "info":      "#4C9ED9",
+    "surface":   "#FFFFFF",
+    "border":    "#E0E4E8",
+    "text":      "#1A1F36",
+    "muted":     "#6B7280",
 }
 
 EMOTION_EMOJI = {
     "happy": "😊", "neutral": "😐", "sad": "😢",
-    "angry": "😠", "fear": "😰", "surprise": "😲", "disgust": "😑"
+    "angry": "😠", "fear": "😰", "surprise": "😲", "disgust": "😑",
 }
 
+# ─────────────────────────────────────────────
+# HELPERS
+# ─────────────────────────────────────────────
+def _score_emoji(s):
+    return "🟢" if s >= 8 else ("🟡" if s >= 6 else ("🟠" if s >= 4 else "🔴"))
 
-# ═══════════════════════════════════════════════════════════════════════════
-# HELPER FUNCTIONS
-# ═══════════════════════════════════════════════════════════════════════════
+def _score_label(s):
+    return "Excellent" if s >= 8 else ("Good" if s >= 6 else ("Average" if s >= 4 else "Needs Work"))
 
-def _score_emoji(s: float) -> str:
-    if s >= 8:  return "🟢"
-    if s >= 6:  return "🟡"
-    if s >= 4:  return "🟠"
-    return "🔴"
+def _verdict_badge(v):
+    return {"Strong Advance": "🟢 Strong Advance", "Advance": "🔵 Advance",
+            "Borderline": "🟡 Borderline", "Do Not Advance": "🔴 Do Not Advance"}.get(v, v or "—")
 
+def _verdict_from_score(cog):
+    return ("Strong Advance" if cog >= 7.5 else
+            "Advance" if cog >= 5.5 else
+            "Borderline" if cog >= 3.5 else "Do Not Advance")
 
-def _score_label(s: float) -> str:
-    if s >= 8:  return "Excellent"
-    if s >= 6:  return "Good"
-    if s >= 4:  return "Average"
-    return "Needs Work"
-
-
-def _verdict_badge(v: str) -> str:
-    badges = {
-        "Strong Advance": "🟢 Strong Advance",
-        "Advance":        "🔵 Advance",
-        "Borderline":     "🟡 Borderline",
-        "Do Not Advance": "🔴 Do Not Advance",
-    }
-    return badges.get(v, v or "—")
+def _verdict_color(v):
+    return {
+        "Strong Advance": C["primary"], "Advance": C["secondary"],
+        "Borderline": C["accent"],      "Do Not Advance": C["danger"],
+    }.get(v, C["muted"])
 
 
-def _get_verdict_from_score(avg_cog: float) -> str:
-    """Compute recruiter verdict based on cognitive score."""
-    if avg_cog >= 7.5:  return "Strong Advance"
-    if avg_cog >= 5.5:  return "Advance"
-    if avg_cog >= 3.5:  return "Borderline"
-    return "Do Not Advance"
-
-
-def _get_verdict_color(verdict: str) -> str:
-    """Return hex color for verdict badge."""
-    color_map = {
-        "Strong Advance": COLORS["success"],
-        "Advance":        COLORS["secondary"],
-        "Borderline":     COLORS["accent"],
-        "Do Not Advance": COLORS["danger"],
-    }
-    return color_map.get(verdict, COLORS["text_light"])
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# PDF GENERATOR (Enhanced)
-# ═══════════════════════════════════════════════════════════════════════════
-
+# ─────────────────────────────────────────────
+# PDF
+# ─────────────────────────────────────────────
 def generate_candidate_pdf(session_id: int) -> bytes:
-    """
-    Build and return a professional PDF report for one candidate session.
-    Uses reportlab Platypus for clean multi-page layout.
-    Includes recruiter insights, verdicts, and detailed analytics.
-    """
     s = get_session_by_id(session_id)
     if not s:
         return b""
 
-    insight  = json.loads(s.insight_json) if s.insight_json else {}
-    per_q    = json.loads(s.per_question_json) if s.per_question_json else []
+    insight  = json.loads(s.insight_json)           if s.insight_json           else {}
+    per_q    = json.loads(s.per_question_json)       if s.per_question_json       else []
     verdicts = json.loads(s.recruiter_verdicts_json) if s.recruiter_verdicts_json else []
 
     buf = io.BytesIO()
-    doc = SimpleDocTemplate(
-        buf,
-        pagesize=A4,
-        leftMargin=20*mm, rightMargin=20*mm,
-        topMargin=20*mm,  bottomMargin=20*mm,
-        title=f"PsySense Report — {s.candidate_name}",
-    )
-
-    styles = getSampleStyleSheet()
-
-    # ── Custom Styles ─────────────────────────────────────────────────
-    title_style = ParagraphStyle(
-        "ReportTitle",
-        parent=styles["Title"],
-        fontSize=22,
-        textColor=colors.HexColor(COLORS["primary"]),
-        spaceAfter=6,
-        fontName="Helvetica-Bold",
-    )
-    h1_style = ParagraphStyle(
-        "H1", parent=styles["Heading1"],
-        fontSize=14, textColor=colors.HexColor(COLORS["secondary"]),
-        spaceAfter=6, fontName="Helvetica-Bold",
-    )
-    h2_style = ParagraphStyle(
-        "H2", parent=styles["Heading2"],
-        fontSize=11, textColor=colors.HexColor(COLORS["text_dark"]),
-        spaceAfter=4, fontName="Helvetica-Bold",
-    )
-    body_style = ParagraphStyle(
-        "Body", parent=styles["Normal"],
-        fontSize=9, leading=13, spaceAfter=3,
-    )
-    caption_style = ParagraphStyle(
-        "Caption", parent=styles["Normal"],
-        fontSize=8, textColor=colors.HexColor(COLORS["text_light"]),
-        spaceAfter=2,
-    )
-    answer_style = ParagraphStyle(
-        "Answer", parent=styles["Normal"],
-        fontSize=9, leading=13,
-        backColor=colors.HexColor("#F0F4F8"),
-        borderPad=5, spaceAfter=4,
-    )
+    doc = SimpleDocTemplate(buf, pagesize=A4,
+                            leftMargin=20*mm, rightMargin=20*mm,
+                            topMargin=20*mm,  bottomMargin=20*mm)
+    styles  = getSampleStyleSheet()
+    title_s = ParagraphStyle("T",  parent=styles["Title"],   fontSize=20,
+                              fontName="Helvetica-Bold",
+                              textColor=colors.HexColor(C["primary"]), spaceAfter=4)
+    h1_s    = ParagraphStyle("H1", parent=styles["Heading1"], fontSize=13,
+                              fontName="Helvetica-Bold",
+                              textColor=colors.HexColor(C["secondary"]), spaceAfter=5)
+    h2_s    = ParagraphStyle("H2", parent=styles["Heading2"], fontSize=11,
+                              fontName="Helvetica-Bold",
+                              textColor=colors.HexColor(C["text"]), spaceAfter=4)
+    body_s  = ParagraphStyle("B",  parent=styles["Normal"],  fontSize=9,
+                              leading=13, spaceAfter=3)
+    cap_s   = ParagraphStyle("C",  parent=styles["Normal"],  fontSize=8,
+                              textColor=colors.HexColor(C["muted"]), spaceAfter=2)
+    ans_s   = ParagraphStyle("A",  parent=styles["Normal"],  fontSize=9, leading=13,
+                              backColor=colors.HexColor("#F0F4F8"), borderPad=5, spaceAfter=4)
 
     def hr():
         return HRFlowable(width="100%", thickness=0.5,
-                         color=colors.HexColor(COLORS["border"]),
-                         spaceAfter=8)
-
+                          color=colors.HexColor(C["border"]), spaceAfter=8)
     def sp(h=6):
         return Spacer(1, h)
 
-    # ── Compute verdict ────────────────────────────────────────────────
+    sc      = s.final_score or 0
     avg_cog = s.cognitive_score or 5.0
-    overall_verdict = _get_verdict_from_score(avg_cog)
-    verdict_color = _get_verdict_color(overall_verdict)
-    sc = s.final_score or 0
+    verdict = _verdict_from_score(avg_cog)
+    vc      = _verdict_color(verdict)
 
-    # ── Build story ────────────────────────────────────────────────────
-    story = []
-
-    # Header
-    story.append(Paragraph("PsySense AI Interview Platform", caption_style))
-    story.append(Paragraph(f"Candidate Report: {s.candidate_name}", title_style))
-    story.append(sp(2))
-
-    meta_text = (
-        f"Date: {s.created_at.strftime('%d %b %Y, %H:%M')}  |  "
-        f"Questions: {s.questions_answered}  |  "
-        f"{'JD-Scored ✓' if s.jd_used else 'No JD'}  |  "
-        f"Session #{s.id}"
-    )
-    story.append(Paragraph(meta_text, caption_style))
-    story.append(sp(6))
-    story.append(hr())
-
-    # Verdict banner
-    story.append(Paragraph(
-        f'<font color="{verdict_color}"><b>Recruiter Verdict: {overall_verdict}</b></font> — '
-        f'Overall Score: <b>{sc}/100</b>  |  '
-        f'Recommendation: <b>{insight.get("recommendation", "N/A")}</b>',
-        body_style,
-    ))
-    story.append(sp(8))
-
-    # Score Summary Table
-    story.append(Paragraph("Score Summary", h1_style))
-    score_data = [
-        ["Dimension", "Score", "Level"],
-        ["Answer Quality (Cognitive)", f"{round(s.cognitive_score or 5, 1)} / 10",
-         _score_label(s.cognitive_score or 5)],
-        ["Emotional Tone (Speech)", f"{round(s.emotion_score or 5, 1)} / 10",
-         _score_label(s.emotion_score or 5)],
-        ["Attentiveness (Engagement)", f"{round(s.engagement_score or 5, 1)} / 10",
-         _score_label(s.engagement_score or 5)],
-        ["Overall Behavioural Score", f"{sc} / 100", ""],
+    story = [
+        Paragraph("PsySense AI Interview Platform", cap_s),
+        Paragraph(f"Candidate Report: {s.candidate_name}", title_s),
+        sp(2),
+        Paragraph(
+            f"Date: {s.created_at.strftime('%d %b %Y, %H:%M')}  |  "
+            f"Questions: {s.questions_answered}  |  "
+            f"{'JD-Scored' if s.jd_used else 'No JD'}  |  Session #{s.id}", cap_s),
+        sp(6), hr(),
+        Paragraph(
+            f'<font color="{vc}"><b>Verdict: {verdict}</b></font> — '
+            f'Score: <b>{sc}/100</b>  |  '
+            f'Recommendation: <b>{insight.get("recommendation","N/A")}</b>', body_s),
+        sp(8),
+        Paragraph("Score Summary", h1_s),
     ]
 
-    score_table = Table(score_data, colWidths=[90*mm, 40*mm, 40*mm])
-    score_table.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(COLORS["secondary"])),
-        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-        ("FONTSIZE", (0, 0), (-1, 0), 9),
-        ("ROWBACKGROUNDS", (0, 1), (-1, -1),
-         [colors.HexColor("#F7F9FC"), colors.white]),
-        ("FONTSIZE", (0, 1), (-1, -1), 9),
-        ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor(COLORS["border"])),
-        ("TOPPADDING", (0, 0), (-1, -1), 5),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
-        ("LEFTPADDING", (0, 0), (-1, -1), 6),
-        ("FONTNAME", (0, 4), (-1, 4), "Helvetica-Bold"),
+    tbl = Table(
+        [["Dimension", "Score", "Level"],
+         ["Answer Quality", f"{round(s.cognitive_score or 5,1)}/10",
+          _score_label(s.cognitive_score or 5)],
+         ["Emotional Tone", f"{round(s.emotion_score or 5,1)}/10",
+          _score_label(s.emotion_score or 5)],
+         ["Attentiveness",  f"{round(s.engagement_score or 5,1)}/10",
+          _score_label(s.engagement_score or 5)],
+         ["Overall Score",  f"{sc}/100", ""]],
+        colWidths=[90*mm, 40*mm, 40*mm])
+    tbl.setStyle(TableStyle([
+        ("BACKGROUND",    (0,0),(-1,0), colors.HexColor(C["secondary"])),
+        ("TEXTCOLOR",     (0,0),(-1,0), colors.white),
+        ("FONTNAME",      (0,0),(-1,0), "Helvetica-Bold"),
+        ("FONTSIZE",      (0,0),(-1,-1), 9),
+        ("ROWBACKGROUNDS",(0,1),(-1,-1), [colors.HexColor("#F7F9FC"), colors.white]),
+        ("GRID",          (0,0),(-1,-1), 0.4, colors.HexColor(C["border"])),
+        ("TOPPADDING",    (0,0),(-1,-1), 5),
+        ("BOTTOMPADDING", (0,0),(-1,-1), 5),
+        ("LEFTPADDING",   (0,0),(-1,-1), 6),
+        ("FONTNAME",      (0,4),(-1,4),  "Helvetica-Bold"),
     ]))
-    story.append(score_table)
-    story.append(sp(10))
+    story += [tbl, sp(10)]
 
-    # AI Recruiter Assessment (Insight) — RECRUITER ONLY
     if insight:
-        story.append(hr())
-        story.append(Paragraph("🎯 AI Recruiter Assessment", h1_style))
-
-        if insight.get("strengths"):
-            story.append(Paragraph("Strengths", h2_style))
-            for item in insight["strengths"]:
-                story.append(Paragraph(f"✓ {item}", body_style))
-            story.append(sp(4))
-
-        if insight.get("weaknesses"):
-            story.append(Paragraph("Areas to Improve", h2_style))
-            for item in insight["weaknesses"]:
-                story.append(Paragraph(f"⚠ {item}", body_style))
-            story.append(sp(4))
-
+        story += [hr(), Paragraph("AI Recruiter Assessment", h1_s)]
+        for item in insight.get("strengths", []):
+            story.append(Paragraph(f"✓ {item}", body_s))
+        for item in insight.get("weaknesses", []):
+            story.append(Paragraph(f"⚠ {item}", body_s))
         if insight.get("recommendation"):
             story.append(Paragraph(
-                f"<b>Hiring Recommendation:</b> {insight['recommendation']}", body_style
-            ))
+                f"<b>Recommendation:</b> {insight['recommendation']}", body_s))
         story.append(sp(10))
 
-    # Per-Question Breakdown
     if per_q:
-        story.append(hr())
-        story.append(Paragraph("Question-by-Question Breakdown", h1_style))
-        story.append(sp(4))
-
-        DIM_LABELS = {
-            "clarity": "Clarity", "relevance": "Relevance",
-            "star_quality": "STAR", "specificity": "Specificity",
-            "communication": "Communication", "job_fit": "Job Fit",
-        }
-
+        story += [hr(), Paragraph("Question-by-Question Breakdown", h1_s), sp(4)]
+        DIM = {"clarity": "Clarity", "relevance": "Relevance", "star_quality": "STAR",
+               "specificity": "Specificity", "communication": "Communication",
+               "job_fit": "Job Fit"}
         for i, qd in enumerate(per_q):
-            v_label = qd.get("verdict", verdicts[i] if i < len(verdicts) else "")
-
-            story.append(Paragraph(f"<b>Q{i+1}:</b> {qd.get('question', '')}", h2_style))
-
-            if v_label:
-                story.append(Paragraph(f"Verdict: <b>{v_label}</b>", caption_style))
-
-            ans_text = qd.get("answer") or "No answer recorded."
-            story.append(Paragraph(ans_text, answer_style))
-
-            # Scores mini-table
-            q_scores = [
-                ["Answer Quality", "Emotional Tone", "Attentiveness", "Face Visible"],
-                [
-                    f"{round(qd.get('cognitive', 5), 1)}/10",
-                    f"{round(qd.get('emotion', 5), 1)}/10",
-                    f"{round(qd.get('engagement', 5), 1)}/10",
-                    f"{100 - qd.get('absence', 0)*100:.0f}%",
-                ],
+            v_lbl = qd.get("verdict", verdicts[i] if i < len(verdicts) else "")
+            story += [
+                Paragraph(f"<b>Q{i+1}:</b> {qd.get('question','')}", h2_s),
+                Paragraph(f"Verdict: <b>{v_lbl}</b>", cap_s) if v_lbl else sp(0),
+                Paragraph(qd.get("answer") or "No answer recorded.", ans_s),
             ]
-            q_tbl = Table(q_scores, colWidths=[42*mm, 42*mm, 42*mm, 42*mm])
-            q_tbl.setStyle(TableStyle([
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(COLORS["info"])),
-                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                ("FONTSIZE", (0, 0), (-1, -1), 8),
-                ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-                ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor(COLORS["border"])),
-                ("TOPPADDING", (0, 0), (-1, -1), 4),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+            qt = Table(
+                [["Answer Quality", "Emotional Tone", "Attentiveness", "Face Visible"],
+                 [f"{round(qd.get('cognitive',5),1)}/10",
+                  f"{round(qd.get('emotion',5),1)}/10",
+                  f"{round(qd.get('engagement',5),1)}/10",
+                  f"{100 - qd.get('absence',0)*100:.0f}%"]],
+                colWidths=[42*mm]*4)
+            qt.setStyle(TableStyle([
+                ("BACKGROUND",    (0,0),(-1,0), colors.HexColor(C["info"])),
+                ("TEXTCOLOR",     (0,0),(-1,0), colors.white),
+                ("FONTNAME",      (0,0),(-1,0), "Helvetica-Bold"),
+                ("FONTSIZE",      (0,0),(-1,-1), 8),
+                ("ALIGN",         (0,0),(-1,-1), "CENTER"),
+                ("GRID",          (0,0),(-1,-1), 0.3, colors.HexColor(C["border"])),
+                ("TOPPADDING",    (0,0),(-1,-1), 4),
+                ("BOTTOMPADDING", (0,0),(-1,-1), 4),
             ]))
-            story.append(q_tbl)
-            story.append(sp(6))
+            story += [qt, sp(6), hr()]
 
-            story.append(hr())
-
-    # Footer
-    story.append(sp(8))
     story.append(Paragraph(
-        "This report was generated by PsySense AI Interview Platform. "
-        "For internal recruiter use only. Confidential.",
-        caption_style,
-    ))
-
+        "PsySense AI — For internal recruiter use only. Confidential.", cap_s))
     doc.build(story)
     return buf.getvalue()
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# MAIN ENTRY POINT
-# ═══════════════════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────
+# MAIN DASHBOARD
+# ─────────────────────────────────────────────
+RECRUITER_NAV_OPTIONS = ["📋 Candidates", "💼 Jobs", "👥 Students", "📈 Analytics"]
+
 
 def show_recruiter_dashboard():
-    """
-    Premium recruiter dashboard with top-tier design.
-    Features: logout button, PDF downloads, insights, advanced analytics.
-    """
-    
-    # ── Page Config ────────────────────────────────────────────────────
-    st.set_page_config(
-        page_title="PsySense Recruiter Dashboard",
-        page_icon="🏢",
-        layout="wide",
-        initial_sidebar_state="expanded",
-    )
+    if "recruiter_nav" not in st.session_state:
+        st.session_state.recruiter_nav = "📋 Candidates"
 
-    # ── Custom CSS for Premium Design ──────────────────────────────────
-    st.markdown(f"""
+    st.markdown("""
     <style>
-    :root {{
-        --color-primary: {COLORS['primary']};
-        --color-secondary: {COLORS['secondary']};
-        --color-accent: {COLORS['accent']};
-        --color-danger: {COLORS['danger']};
-        --color-background: {COLORS['background']};
-        --color-surface: {COLORS['surface']};
-        --color-border: {COLORS['border']};
-        --color-text-dark: {COLORS['text_dark']};
-        --color-text-light: {COLORS['text_light']};
-    }}
+    @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;600;700&display=swap');
+    html, body, [class*="css"] { font-family: 'DM Sans', sans-serif !important; }
+    .stApp { background: #F0F4F8 !important; }
+    #MainMenu, footer, header { visibility: hidden; }
 
-    /* Enhanced header styling */
-    header {{
-        background: linear-gradient(135deg, {COLORS['primary']} 0%, {COLORS['secondary']} 100%);
-        padding: 20px 0 !important;
-    }}
+    .ps-topbar {
+        background: linear-gradient(120deg, #185FA5 0%, #1D9E75 100%);
+        padding: 14px 24px; border-radius: 12px; margin-bottom: 16px;
+    }
+    .ps-topbar h2 { color: #fff !important; margin: 0; font-size: 20px; }
+    .ps-topbar p  { color: rgba(255,255,255,0.8) !important; margin: 2px 0 0; font-size: 12px; }
 
-    /* Premium card styling */
-    .recruiter-card {{
-        border: 1px solid {COLORS['border']};
-        border-radius: 12px;
-        padding: 20px;
-        background: {COLORS['surface']};
-        box-shadow: 0 2px 8px rgba(0,0,0,0.08);
-        transition: all 0.3s ease;
-    }}
-
-    .recruiter-card:hover {{
-        box-shadow: 0 8px 24px rgba(0,0,0,0.12);
-        transform: translateY(-2px);
-    }}
-
-    /* Metric cards */
-    .metric-card {{
-        background: linear-gradient(135deg, {COLORS['primary']}0a 0%, {COLORS['secondary']}0a 100%);
-        border-left: 4px solid {COLORS['primary']};
-        padding: 16px;
-        border-radius: 8px;
-        margin: 8px 0;
-    }}
-
-    /* Verdict badges */
-    .verdict-strong {{
-        background-color: {COLORS['success']}1a;
-        color: {COLORS['success']};
-        padding: 4px 12px;
-        border-radius: 20px;
-        font-size: 12px;
-        font-weight: 600;
-    }}
-
-    .verdict-advance {{
-        background-color: {COLORS['secondary']}1a;
-        color: {COLORS['secondary']};
-        padding: 4px 12px;
-        border-radius: 20px;
-        font-size: 12px;
-        font-weight: 600;
-    }}
-
-    .verdict-borderline {{
-        background-color: {COLORS['accent']}1a;
-        color: {COLORS['accent']};
-        padding: 4px 12px;
-        border-radius: 20px;
-        font-size: 12px;
-        font-weight: 600;
-    }}
-
-    .verdict-danger {{
-        background-color: {COLORS['danger']}1a;
-        color: {COLORS['danger']};
-        padding: 4px 12px;
-        border-radius: 20px;
-        font-size: 12px;
-        font-weight: 600;
-    }}
-
-    /* Button enhancements */
-    button {{
-        border-radius: 8px;
-        transition: all 0.2s ease;
-    }}
-
-    button:hover {{
-        transform: scale(1.02);
-    }}
-
-    /* Logout button styling */
-    .logout-btn {{
-        background-color: {COLORS['danger']} !important;
-        color: white !important;
-        border-radius: 8px;
-        font-weight: 600;
-        padding: 8px 16px;
-    }}
-
-    .logout-btn:hover {{
-        background-color: #a01a1a !important;
-    }}
-
-    /* Make all text black */
-    body, p, h1, h2, h3, h4, h5, h6, span, div, button, input, textarea {{
-        color: {COLORS['text_dark']} !important;
-    }}
-
-    /* Override Streamlit defaults to ensure visibility */
-    .stMarkdown {{
-        color: {COLORS['text_dark']} !important;
-    }}
-
-    .stMetric {{
-        color: {COLORS['text_dark']} !important;
-    }}
-
-    .stButton > button {{
-        color: {COLORS['text_dark']} !important;
-    }}
-
-    /* Table styling */
-    table {{
-        border-collapse: collapse;
-        width: 100%;
-        color: {COLORS['text_dark']} !important;
-    }}
-
-    thead {{
-        background-color: {COLORS['secondary']};
-        color: white !important;
-    }}
-
-    tbody {{
-        color: {COLORS['text_dark']} !important;
-    }}
-
-    tbody tr:nth-child(even) {{
-        background-color: {COLORS['background']};
-        color: {COLORS['text_dark']} !important;
-    }}
-
-    tbody tr:hover {{
-        background-color: {COLORS['primary']}0f;
-        color: {COLORS['text_dark']} !important;
-    }}
-
-    /* Make labels and captions black */
-    .stCaption {{
-        color: {COLORS['text_dark']} !important;
-    }}
-
-    .stSelectbox label {{
-        color: {COLORS['text_dark']} !important;
-    }}
-
-    .stTextInput label {{
-        color: {COLORS['text_dark']} !important;
-    }}
-
-    .stTextArea label {{
-        color: {COLORS['text_dark']} !important;
-    }}
+    [data-testid="stMetric"] {
+        background: #fff !important; border: 1px solid #E0E4E8 !important;
+        border-radius: 10px !important; padding: 14px 16px !important;
+    }
+    [data-testid="stMetricValue"] > div {
+        font-size: 24px !important; font-weight: 700 !important;
+    }
+    [data-testid="stMetricLabel"] > div {
+        font-size: 11px !important; font-weight: 600 !important;
+        text-transform: uppercase !important; color: #6B7280 !important;
+    }
+    [data-testid="stDownloadButton"] > button {
+        background: rgba(24,95,165,0.12) !important;
+        border: 1.5px solid rgba(24,95,165,0.35) !important;
+        color: #185FA5 !important; border-radius: 8px !important;
+        font-weight: 600 !important;
+    }
+    [data-testid="stDownloadButton"] > button:hover {
+        background: #185FA5 !important; color: #fff !important;
+    }
+    .vbadge { display:inline-block; padding:3px 11px; border-radius:20px;
+               font-size:12px; font-weight:700; }
+    .vb-green  { background:#1D9E7515; color:#1D9E75; border:1px solid #1D9E7540; }
+    .vb-blue   { background:#185FA515; color:#185FA5; border:1px solid #185FA540; }
+    .vb-yellow { background:#E8A02015; color:#E8A020; border:1px solid #E8A02050; }
+    .vb-red    { background:#CC222215; color:#CC2222; border:1px solid #CC222240; }
     </style>
     """, unsafe_allow_html=True)
 
-    # ── Header with Logo & Logout ──────────────────────────────────────
-    header_col1, header_col2, header_col3 = st.columns([2, 3, 1])
-    
-    with header_col1:
-        st.markdown(f"### 🏢 PsySense")
-        st.caption("Recruiter Dashboard")
-    
-    with header_col2:
-        st.markdown("")  # spacer
-    
-    with header_col3:
-        st.markdown("")  # spacer
-        if st.button(
-            "🚪 Logout",
-            key="recruiter_logout_btn",
-            use_container_width=True,
-            help="Sign out of your recruiter account"
-        ):
-            st.session_state.clear()
-            st.rerun()
-
-    st.markdown("---")
-
-    # ── Sidebar Navigation ─────────────────────────────────────────────
+    # ── SIDEBAR — account & billing (primary nav is horizontal in main area)
     with st.sidebar:
-        st.markdown("## 📊 Navigation")
-        
-        nav_mode = st.radio(
-            "View",
-            ["📋 Candidates", "👥 Students", "📈 Analytics"],
-            label_visibility="collapsed"
-        )
-
+        st.markdown("## 🏢 PsySense")
         st.markdown("---")
-        st.markdown("### ⚙️ Quick Actions")
-        
         if st.session_state.get("recruiter_detail_id"):
             if st.button("← Back to List", use_container_width=True):
                 st.session_state.recruiter_detail_id = None
                 st.rerun()
 
-        st.markdown("---")
-        st.caption("💡 Tip: Click 'Full Report' to see detailed analytics and insights.")
+        st.markdown("**📧 Notification Email**")
+        from database import SessionLocal, User
+        _db = SessionLocal()
+        try:
+            _me = _db.query(User).filter_by(
+                username=st.session_state.auth_username).first()
+            _cur_email = _me.email or "" if _me else ""
+        finally:
+            _db.close()
 
-    # ── Route to Views ─────────────────────────────────────────────────
-    if st.session_state.get("recruiter_detail_id"):
-        _show_candidate_detail(st.session_state.recruiter_detail_id)
+        new_email = st.text_input("Email", value=_cur_email,
+                                  placeholder="you@email.com",
+                                  key="recruiter_email_input",
+                                  label_visibility="collapsed")
+        if st.button("💾 Save Email", use_container_width=True, key="save_email_btn"):
+            _db2 = SessionLocal()
+            try:
+                _u = _db2.query(User).filter_by(
+                    username=st.session_state.auth_username).first()
+                if _u:
+                    _u.email = new_email.strip()
+                    _db2.commit()
+                    st.success("✅ Saved")
+            finally:
+                _db2.close()
+
+        st.markdown("---")
+        if st.button("🚪 Sign Out", use_container_width=True, key="sidebar_logout"):
+            st.session_state.clear()
+            st.rerun()
+
+        if st.session_state.get("org_id"):
+            from saas.saas_auth import show_saas_billing_sidebar
+            show_saas_billing_sidebar(st.session_state.org_id)
+
+    # ── TOP BAR ──
+    col_title, col_logout = st.columns([6, 1])
+    with col_title:
+        st.markdown("""
+        <div class="ps-topbar">
+            <h2>🏢 PsySense — Recruiter Intelligence Dashboard</h2>
+            <p>AI-powered interview analysis platform</p>
+        </div>
+        """, unsafe_allow_html=True)
+    with col_logout:
+        st.markdown("<div style='padding-top:8px'>", unsafe_allow_html=True)
+        if st.button("🚪 Logout", key="top_logout", use_container_width=True):
+            st.session_state.clear()
+            st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    _idx = (
+        RECRUITER_NAV_OPTIONS.index(st.session_state.recruiter_nav)
+        if st.session_state.recruiter_nav in RECRUITER_NAV_OPTIONS else 0
+    )
+    main_nav = st.radio(
+        "Section",
+        RECRUITER_NAV_OPTIONS,
+        horizontal=True,
+        index=_idx,
+        label_visibility="collapsed",
+    )
+    if main_nav != st.session_state.recruiter_nav:
+        st.session_state.recruiter_nav = main_nav
+        st.session_state.recruiter_detail_id = None
+        st.rerun()
+
+    # ── ROUTING ──
+    detail_id = st.session_state.get("recruiter_detail_id")
+    nav_mode  = st.session_state.recruiter_nav
+
+    if detail_id:
+        _show_candidate_detail(detail_id)
+    elif nav_mode == "📋 Candidates":
+        _show_overview()
+    elif nav_mode == "💼 Jobs":
+        from recruiter_jd_page import show_jd_page
+        show_jd_page()
     elif nav_mode == "👥 Students":
         _show_registered_students()
     elif nav_mode == "📈 Analytics":
         _show_analytics()
-    else:
-        _show_overview()
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# OVERVIEW VIEW
-# ═══════════════════════════════════════════════════════════════════════════
-
+# ─────────────────────────────────────────────
+# CANDIDATES OVERVIEW
+# ─────────────────────────────────────────────
 def _show_overview():
-    """Display candidate overview with filters, search, and insights."""
-    
     sessions = get_all_sessions()
-
     if not sessions:
-        st.info(
-            "🎤 No interviews yet. Candidates will appear here automatically "
-            "after completing their interview."
-        )
+        st.info("🎤 No interviews yet. Candidates appear here after completing an interview.")
         return
 
-    # ── Key Metrics ────────────────────────────────────────────────────
-    total = len(sessions)
-    avg_s = round(sum(s.final_score or 0 for s in sessions) / total, 1)
-    passed = sum(1 for s in sessions if (s.final_score or 0) >= 55)
-    flagged = sum(1 for s in sessions if s.flagged)
+    total       = len(sessions)
+    avg_s       = round(sum(s.final_score or 0 for s in sessions) / total, 1)
+    passed      = sum(1 for s in sessions if (s.final_score or 0) >= 55)
+    flagged     = sum(1 for s in sessions if s.flagged)
     shortlisted = sum(1 for s in sessions if s.status == "Shortlisted")
 
-    metric_cols = st.columns(5)
-    with metric_cols[0]:
-        st.metric("👥 Total Candidates", total)
-    with metric_cols[1]:
-        st.metric("📊 Avg Score", f"{avg_s}/100")
-    with metric_cols[2]:
-        st.metric("✅ Pass Rate", f"{round(passed / total * 100, 1)}%")
-    with metric_cols[3]:
-        st.metric("🚩 Flagged", flagged)
-    with metric_cols[4]:
-        st.metric("⭐ Shortlisted", shortlisted)
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("👥 Total",       total)
+    c2.metric("📊 Avg Score",   f"{avg_s}/100")
+    c3.metric("✅ Pass Rate",   f"{round(passed/total*100,1)}%")
+    c4.metric("🚩 Flagged",     flagged)
+    c5.metric("⭐ Shortlisted", shortlisted)
 
     st.markdown("---")
 
-    # ── Filters & Search ───────────────────────────────────────────────
-    col_search, col_status, col_sort = st.columns([3, 2, 2])
-    
-    with col_search:
-        search = st.text_input(
-            "🔍 Search by name",
-            placeholder="Type candidate name...",
-            label_visibility="collapsed"
-        )
-    
-    with col_status:
-        status_filter = st.selectbox(
-            "Status Filter",
-            ["All", "Pending", "Shortlisted", "Rejected"],
-            label_visibility="collapsed"
-        )
-    
+    col_s, col_f, col_sort = st.columns([3, 2, 2])
+    with col_s:
+        search = st.text_input("Search", placeholder="🔍 Search by name...",
+                               label_visibility="collapsed")
+    with col_f:
+        status_filter = st.selectbox("Status",
+                                     ["All", "Pending", "Shortlisted", "Rejected"],
+                                     label_visibility="collapsed")
     with col_sort:
-        sort_by = st.selectbox(
-            "Sort By",
-            ["Date ↓", "Score ↓", "Score ↑", "Name A-Z"],
-            label_visibility="collapsed"
-        )
+        sort_by = st.selectbox("Sort",
+                               ["Date ↓", "Score ↓", "Score ↑", "Name A-Z"],
+                               label_visibility="collapsed")
 
-    # ── Apply Filters ──────────────────────────────────────────────────
     filtered = list(sessions)
-    
     if search.strip():
-        filtered = [s for s in filtered 
-                   if search.lower() in s.candidate_name.lower()]
-    
+        filtered = [s for s in filtered if search.lower() in s.candidate_name.lower()]
     if status_filter != "All":
         filtered = [s for s in filtered if s.status == status_filter]
+    sort_map = {
+        "Score ↓":  lambda s: -(s.final_score or 0),
+        "Score ↑":  lambda s:  (s.final_score or 0),
+        "Name A-Z": lambda s:   s.candidate_name.lower(),
+    }
+    if sort_by in sort_map:
+        filtered.sort(key=sort_map[sort_by])
 
-    sort_key = {
-        "Score ↓": lambda s: -(s.final_score or 0),
-        "Score ↑": lambda s: (s.final_score or 0),
-        "Name A-Z": lambda s: s.candidate_name.lower(),
-    }.get(sort_by)
-    
-    if sort_key:
-        filtered.sort(key=sort_key)
+    st.markdown(f"**{len(filtered)} candidate(s)**")
 
-    st.markdown(f"**{len(filtered)} candidate(s) shown**")
-
-    # ── Candidate List ─────────────────────────────────────────────────
     STATUS_ICON = {"Pending": "🕐", "Shortlisted": "⭐", "Rejected": "❌"}
+    BADGE_CLASS = {"Strong Advance": "vb-green", "Advance": "vb-blue",
+                   "Borderline": "vb-yellow",    "Do Not Advance": "vb-red"}
 
     for s in filtered:
-        sc = s.final_score or 0
-        emoji = "🟢" if sc >= 75 else ("🟡" if sc >= 55 else "🔴")
-        si = STATUS_ICON.get(s.status, "")
-        
+        sc      = s.final_score or 0
+        emoji   = "🟢" if sc >= 75 else ("🟡" if sc >= 55 else "🔴")
+        verdict = _verdict_from_score(s.cognitive_score or 5.0)
+        bc      = BADGE_CLASS.get(verdict, "vb-yellow")
+        si      = STATUS_ICON.get(s.status, "")
         insight_data = json.loads(s.insight_json) if s.insight_json else {}
-        avg_cog = s.cognitive_score or 5.0
-        verdict = _get_verdict_from_score(avg_cog)
 
         with st.container(border=True):
-            # Row 1: Name, scores, verdict
-            row1_cols = st.columns([2.5, 0.8, 0.7, 0.7, 0.7, 1.0, 1.2])
-            
-            row1_cols[0].markdown(
-                f"**{s.candidate_name}**  \n"
-                f"`{s.username or '—'}` · {si} {s.status}"
-            )
-            row1_cols[1].markdown(f"{emoji} **{sc}**")
-            row1_cols[2].caption(f"🧠 {s.cognitive_score or '—'}")
-            row1_cols[3].caption(f"😊 {s.emotion_score or '—'}")
-            row1_cols[4].caption(f"👁 {s.engagement_score or '—'}")
-            
-            # Verdict badge
-            verdict_color = _get_verdict_color(verdict)
-            row1_cols[5].markdown(
-                f'<span class="verdict-{verdict.lower().replace(" ", "-")}">'
-                f'{_verdict_badge(verdict)}</span>',
-                unsafe_allow_html=True
-            )
-            
-            row1_cols[6].caption(s.created_at.strftime("%d %b %Y"))
+            c1, c2, c3, c4, c5, c6, c7 = st.columns([2.5, 0.8, 0.7, 0.7, 0.7, 1.2, 1.0])
+            c1.markdown(
+                f"**{s.candidate_name}**  \n`{s.username or '—'}` · {si} {s.status}")
+            c2.markdown(f"{emoji} **{sc}**")
+            c3.caption(f"🧠 {round(s.cognitive_score or 0, 1)}")
+            c4.caption(f"😊 {round(s.emotion_score or 0, 1)}")
+            c5.caption(f"👁 {round(s.engagement_score or 0, 1)}")
+            c6.markdown(
+                f'<span class="vbadge {bc}">{_verdict_badge(verdict)}</span>',
+                unsafe_allow_html=True)
+            c7.caption(s.created_at.strftime("%d %b %Y"))
 
-            # Row 2: Action buttons
-            btn_cols = st.columns([1.5, 1, 1])
-            
-            with btn_cols[0]:
+            b1, b2, b3 = st.columns([1.5, 1, 1])
+            with b1:
                 if st.button("📄 Full Report", key=f"view_{s.id}"):
                     st.session_state.recruiter_detail_id = s.id
                     st.rerun()
-
-            with btn_cols[1]:
-                pdf_bytes = generate_candidate_pdf(s.id)
+            with b2:
                 st.download_button(
-                    label="⬇ Download PDF",
-                    data=pdf_bytes,
-                    file_name=f"psysense_{s.candidate_name.replace(' ', '_')}_{s.id}.pdf",
+                    "⬇ PDF", data=generate_candidate_pdf(s.id),
+                    file_name=f"psysense_{s.candidate_name.replace(' ','_')}_{s.id}.pdf",
                     mime="application/pdf",
-                    key=f"pdf_{s.id}",
-                    use_container_width=True,
-                )
-
-            with btn_cols[2]:
-                if st.button("⭐ Flag", key=f"flag_{s.id}"):
+                    key=f"pdf_{s.id}", use_container_width=True)
+            with b3:
+                if st.button("🚩 Flag", key=f"flag_{s.id}"):
                     st.info("Flagged for review")
 
-            # Row 3: AI Insight
             if insight_data.get("recommendation") or insight_data.get("strengths"):
-                with st.expander("🎯 AI Insight", expanded=False):
-                    rec = insight_data.get("recommendation", "N/A")
-                    if rec and rec != "N/A":
+                with st.expander("🎯 AI Insight"):
+                    rec = insight_data.get("recommendation", "")
+                    if rec:
                         st.info(f"**Recommendation:** {rec}")
+                    ic1, ic2 = st.columns(2)
+                    with ic1:
+                        for item in insight_data.get("strengths", []):
+                            st.caption(f"✅ {item}")
+                    with ic2:
+                        for item in insight_data.get("weaknesses", []):
+                            st.caption(f"⚠️ {item}")
 
-                    col_s, col_w = st.columns(2)
-                    
-                    with col_s:
-                        strengths = insight_data.get("strengths", [])
-                        if strengths:
-                            st.markdown("**✅ Strengths**")
-                            for item in strengths:
-                                st.caption(f"→ {item}")
-
-                    with col_w:
-                        weaknesses = insight_data.get("weaknesses", [])
-                        if weaknesses:
-                            st.markdown("**⚠️ Areas to Improve**")
-                            for item in weaknesses:
-                                st.caption(f"→ {item}")
-
-    # ── Score Distribution Chart ───────────────────────────────────────
     if total >= 3:
         st.markdown("---")
         st.markdown("### 📊 Score Distribution")
-        
         score_vals = [s.final_score or 0 for s in sessions]
         buckets = [
-            ("Needs Work\n(<35)", sum(1 for v in score_vals if v < 35)),
-            ("Average\n(35–55)", sum(1 for v in score_vals if 35 <= v < 55)),
-            ("Good\n(55–75)", sum(1 for v in score_vals if 55 <= v < 75)),
-            ("Strong\n(75+)", sum(1 for v in score_vals if v >= 75)),
+            ("<35\nNeeds Work", sum(1 for v in score_vals if v < 35)),
+            ("35-55\nAverage",  sum(1 for v in score_vals if 35 <= v < 55)),
+            ("55-75\nGood",     sum(1 for v in score_vals if 55 <= v < 75)),
+            ("75+\nStrong",     sum(1 for v in score_vals if v >= 75)),
         ]
-        
         fig = go.Figure(go.Bar(
-            x=[b[0] for b in buckets],
-            y=[b[1] for b in buckets],
-            marker_color=[COLORS["danger"], COLORS["accent"], 
-                         COLORS["info"], COLORS["success"]],
-            text=[b[1] for b in buckets],
-            textposition="outside",
-        ))
-        
-        fig.update_layout(
-            yaxis_title="Candidates",
-            xaxis_title="Performance Level",
-            showlegend=False,
-            height=320,
-            margin=dict(t=20, b=80),
-        )
-        
+            x=[b[0] for b in buckets], y=[b[1] for b in buckets],
+            marker_color=[C["danger"], C["accent"], C["info"], C["primary"]],
+            text=[b[1] for b in buckets], textposition="outside"))
+        fig.update_layout(height=300, showlegend=False,
+                          plot_bgcolor="rgba(0,0,0,0)",
+                          paper_bgcolor="rgba(0,0,0,0)",
+                          margin=dict(t=20, b=40))
         st.plotly_chart(fig, use_container_width=True)
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# CANDIDATE DETAIL VIEW
-# ═══════════════════════════════════════════════════════════════════════════
-
+# ─────────────────────────────────────────────
+# CANDIDATE DETAIL
+# ─────────────────────────────────────────────
 def _show_candidate_detail(session_id: int):
-    """Display detailed candidate report with insights and analytics."""
-    
     s = get_session_by_id(session_id)
     if not s:
-        st.error("❌ Candidate record not found.")
+        st.error("❌ Candidate not found.")
         return
 
-    insight = json.loads(s.insight_json) if s.insight_json else {}
-    per_q = json.loads(s.per_question_json) if s.per_question_json else []
+    insight  = json.loads(s.insight_json)           if s.insight_json           else {}
+    per_q    = json.loads(s.per_question_json)       if s.per_question_json       else []
     verdicts = json.loads(s.recruiter_verdicts_json) if s.recruiter_verdicts_json else []
 
-    sc = s.final_score or 0
-    avg_cog = s.cognitive_score or 5.0
-    overall_verdict = _get_verdict_from_score(avg_cog)
+    sc      = s.final_score or 0
+    verdict = _verdict_from_score(s.cognitive_score or 5.0)
+    vc      = _verdict_color(verdict)
 
-    # ── Header with PDF Download ───────────────────────────────────────
-    h_col1, h_col2 = st.columns([4, 1])
-    
-    with h_col1:
+    h1, h2 = st.columns([4, 1])
+    with h1:
         st.markdown(f"## 📋 {s.candidate_name}")
-        meta_text = (
+        st.caption(
             f"📅 {s.created_at.strftime('%d %b %Y, %H:%M')} · "
             f"🎤 {s.questions_answered} questions · "
-            f"{'JD-scored ✓' if s.jd_used else 'No JD'} · "
-            f"ID #{s.id}"
-        )
-        st.caption(meta_text)
-
-    with h_col2:
-        st.markdown("")
-        pdf_bytes = generate_candidate_pdf(session_id)
+            f"{'JD ✓' if s.jd_used else 'No JD'} · ID #{s.id}")
+    with h2:
         st.download_button(
-            label="⬇ Download PDF",
-            data=pdf_bytes,
-            file_name=f"psysense_{s.candidate_name.replace(' ', '_')}_{s.id}.pdf",
+            "⬇ PDF", data=generate_candidate_pdf(session_id),
+            file_name=f"psysense_{s.candidate_name.replace(' ','_')}_{s.id}.pdf",
             mime="application/pdf",
-            key=f"pdf_detail_{session_id}",
-            use_container_width=True,
-        )
+            key=f"pdf_detail_{session_id}", use_container_width=True)
 
-    st.markdown("---")
-
-    # ── Verdict Banner ─────────────────────────────────────────────────
-    verdict_color = _get_verdict_color(overall_verdict)
     st.markdown(f"""
-    <div style="
-        background: {verdict_color}15;
-        border-left: 4px solid {verdict_color};
-        padding: 16px;
-        border-radius: 8px;
-        margin-bottom: 20px;
-    ">
-        <h3 style="margin: 0; color: {verdict_color};">
-            {_verdict_badge(overall_verdict)}
-        </h3>
-        <p style="margin: 8px 0 0 0; color: #666;">
-            Score: <b>{sc}/100</b> | 
-            Recommendation: <b>{insight.get("recommendation", "N/A")}</b>
-        </p>
+    <div style="background:{vc}15;border-left:4px solid {vc};
+         padding:14px 18px;border-radius:10px;margin:12px 0">
+      <b style="color:{vc};font-size:16px">{_verdict_badge(verdict)}</b><br>
+      <span style="color:#444;font-size:14px">
+        Score: <b>{sc}/100</b> &nbsp;|&nbsp;
+        Recommendation: <b>{insight.get("recommendation","N/A")}</b>
+      </span>
     </div>
     """, unsafe_allow_html=True)
 
-    # ── Score Gauge ────────────────────────────────────────────────────
-    col_gauge, col_breakdown = st.columns([1, 1])
-    
-    with col_gauge:
+    g1, g2 = st.columns(2)
+    with g1:
         fig_gauge = go.Figure(go.Indicator(
-            mode="gauge+number",
-            value=sc,
+            mode="gauge+number", value=sc,
             title={"text": "Overall Score"},
-            gauge={
-                "axis": {"range": [0, 100]},
-                "bar": {"color": verdict_color},
-                "steps": [
-                    {"range": [0, 35], "color": f"{COLORS['danger']}20"},
-                    {"range": [35, 55], "color": f"{COLORS['accent']}20"},
-                    {"range": [55, 75], "color": f"{COLORS['info']}20"},
-                    {"range": [75, 100], "color": f"{COLORS['success']}20"},
-                ],
-            },
-        ))
-        fig_gauge.update_layout(height=300, margin=dict(l=20, r=20, t=40, b=20))
+            gauge={"axis": {"range": [0, 100]}, "bar": {"color": vc},
+                   "steps": [{"range": [0,35],   "color": "#fee2e2"},
+                              {"range": [35,55],  "color": "#fef9c3"},
+                              {"range": [55,75],  "color": "#dbeafe"},
+                              {"range": [75,100], "color": "#dcfce7"}],
+                   "borderwidth": 0}))
+        fig_gauge.update_layout(height=280,
+                                margin=dict(l=20, r=20, t=40, b=10),
+                                paper_bgcolor="rgba(0,0,0,0)")
         st.plotly_chart(fig_gauge, use_container_width=True)
 
-    with col_breakdown:
+    with g2:
         fig_bar = go.Figure(go.Bar(
             x=["Answer Quality", "Emotional Tone", "Attentiveness"],
             y=[s.cognitive_score or 5, s.emotion_score or 5, s.engagement_score or 5],
-            marker_color=[COLORS["info"], COLORS["accent"], COLORS["success"]],
-            text=[
-                f"{s.cognitive_score}  {_score_emoji(s.cognitive_score or 0)}",
-                f"{s.emotion_score}  {_score_emoji(s.emotion_score or 0)}",
-                f"{s.engagement_score}  {_score_emoji(s.engagement_score or 0)}",
-            ],
-            textposition="outside",
-        ))
+            marker_color=[C["info"], C["accent"], C["primary"]],
+            text=[f"{round(s.cognitive_score or 5,1)}/10",
+                  f"{round(s.emotion_score or 5,1)}/10",
+                  f"{round(s.engagement_score or 5,1)}/10"],
+            textposition="outside"))
         fig_bar.update_layout(
-            title="Signal Breakdown (out of 10)",
-            yaxis=dict(range=[0, 12]),
-            showlegend=False,
-            height=300,
-            margin=dict(l=20, r=20, t=60, b=20),
-        )
+            title="Signal Breakdown (/10)", yaxis=dict(range=[0, 12]),
+            height=280, showlegend=False,
+            plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+            margin=dict(l=10, r=10, t=50, b=10))
         st.plotly_chart(fig_bar, use_container_width=True)
 
     st.markdown("---")
 
-    # ── Recruiter Actions ──────────────────────────────────────────────
     with st.expander("⚙️ Recruiter Actions", expanded=True):
-        act_col1, act_col2 = st.columns([1, 2])
-        
-        with act_col1:
+        a1, a2 = st.columns([1, 2])
+        with a1:
             new_status = st.selectbox(
-                "Candidate Status",
-                ["Pending", "Shortlisted", "Rejected"],
-                index=["Pending", "Shortlisted", "Rejected"].index(s.status or "Pending"),
-                key=f"status_{session_id}",
-            )
-            if st.button("Update Status", key=f"update_{session_id}", use_container_width=True):
+                "Status", ["Pending", "Shortlisted", "Rejected"],
+                index=["Pending", "Shortlisted", "Rejected"].index(
+                    s.status or "Pending"),
+                key=f"status_{session_id}")
+            if st.button("Update Status", key=f"upd_{session_id}",
+                         use_container_width=True):
                 update_candidate_status(session_id, new_status)
-                st.success(f"✅ Status updated to {new_status}")
+                st.success(f"✅ Updated to {new_status}")
                 st.rerun()
-
-        with act_col2:
+        with a2:
             notes = st.text_area(
-                "Recruiter Notes",
-                value=s.recruiter_notes or "",
-                placeholder="Add private notes about this candidate...",
-                key=f"notes_{session_id}",
-                height=80,
-            )
-            if st.button("💾 Save Notes", key=f"save_notes_{session_id}", use_container_width=True):
+                "Recruiter Notes", value=s.recruiter_notes or "",
+                placeholder="Private notes...",
+                key=f"notes_{session_id}", height=90)
+            if st.button("💾 Save Notes", key=f"save_{session_id}",
+                         use_container_width=True):
                 save_recruiter_notes(session_id, notes)
-                st.success("✅ Notes saved")
+                st.success("✅ Saved")
 
-    st.markdown("---")
-
-    # ── AI Assessment (RECRUITER ONLY) ─────────────────────────────────
     if insight:
-        st.markdown("### 🎯 AI Recruiter Assessment")
-        
-        ins_col1, ins_col2 = st.columns(2)
-        
-        with ins_col1:
-            strengths = insight.get("strengths", [])
-            if strengths:
-                st.markdown("**✅ Strengths**")
-                for item in strengths:
-                    st.success(f"→ {item}")
-
-        with ins_col2:
-            weaknesses = insight.get("weaknesses", [])
-            if weaknesses:
-                st.markdown("**⚠️ Areas to Improve**")
-                for item in weaknesses:
-                    st.warning(f"→ {item}")
-
+        st.markdown("---")
+        st.markdown("### 🎯 AI Assessment")
+        i1, i2 = st.columns(2)
+        with i1:
+            st.markdown("**✅ Strengths**")
+            for item in insight.get("strengths", []):
+                st.success(f"→ {item}")
+        with i2:
+            st.markdown("**⚠️ Areas to Improve**")
+            for item in insight.get("weaknesses", []):
+                st.warning(f"→ {item}")
         if insight.get("recommendation"):
             st.info(f"**Hiring Recommendation:** {insight['recommendation']}")
 
-        st.markdown("---")
-
-    # ── Score Trend ────────────────────────────────────────────────────
     if per_q:
-        st.markdown("### 📈 Score Trend Across Questions")
-        
+        st.markdown("---")
+        st.markdown("### 📈 Score Trend")
         qlabels = [f"Q{i+1}" for i in range(len(per_q))]
-        traces = [
-            ("Answer Quality", [q.get("cognitive", 5) for q in per_q], COLORS["info"]),
-            ("Emotional Tone", [q.get("emotion", 5) for q in per_q], COLORS["accent"]),
-            ("Attentiveness", [q.get("engagement", 5) for q in per_q], COLORS["success"]),
-        ]
-        
-        fig_trend = go.Figure()
-        for name, vals, color in traces:
-            fig_trend.add_trace(go.Scatter(
-                x=qlabels, y=vals, mode="lines+markers", name=name,
+        fig_t = go.Figure()
+        for name, key, color in [
+            ("Answer Quality", "cognitive",  C["info"]),
+            ("Emotional Tone", "emotion",    C["accent"]),
+            ("Attentiveness",  "engagement", C["primary"]),
+        ]:
+            fig_t.add_trace(go.Scatter(
+                x=qlabels, y=[q.get(key, 5) for q in per_q],
+                mode="lines+markers", name=name,
                 line=dict(color=color, width=2.5),
-                marker=dict(size=8),
-            ))
-        
-        fig_trend.update_layout(
-            yaxis=dict(range=[0, 10], title="Score (out of 10)"),
-            xaxis_title="Question",
-            legend=dict(orientation="h", y=-0.2),
-            hovermode="x unified",
-            height=300,
-            margin=dict(b=80),
-        )
-        st.plotly_chart(fig_trend, use_container_width=True)
+                marker=dict(size=8)))
+        fig_t.update_layout(
+            yaxis=dict(range=[0, 10], title="Score /10"),
+            height=280, hovermode="x unified",
+            legend=dict(orientation="h", y=-0.25),
+            plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+            margin=dict(b=60))
+        st.plotly_chart(fig_t, use_container_width=True)
 
         st.markdown("---")
-
-    # ── Per-Question Breakdown ─────────────────────────────────────────
-    if per_q:
-        st.markdown("### Question-by-Question Breakdown")
-
-        DIM_LABELS = {
-            "clarity": "Clarity",
-            "relevance": "Relevance",
-            "star_quality": "STAR Quality",
-            "specificity": "Specificity",
-            "communication": "Communication",
-            "job_fit": "Job Fit",
-        }
+        st.markdown("### Question Breakdown")
+        DIM = {"clarity": "Clarity", "relevance": "Relevance",
+               "star_quality": "STAR", "specificity": "Specificity",
+               "communication": "Communication", "job_fit": "Job Fit"}
 
         for i, qd in enumerate(per_q):
-            v_label = qd.get("verdict", verdicts[i] if i < len(verdicts) else "")
-            badge = _verdict_badge(v_label)
-
-            with st.expander(f"Q{i+1}: {qd.get('question', '')}  {badge}"):
-                st.markdown("**Candidate Answer:**")
+            v_lbl = qd.get("verdict", verdicts[i] if i < len(verdicts) else "")
+            with st.expander(
+                    f"Q{i+1}: {qd.get('question','')} — {_verdict_badge(v_lbl)}"):
+                st.markdown("**Answer:**")
                 st.info(qd.get("answer") or "_No answer recorded._")
 
-                # Metrics
-                m_cols = st.columns(4)
-                m_cols[0].metric("Answer Quality", f"{round(qd.get('cognitive', 5), 1)}/10")
-                m_cols[1].metric("Emotional Tone", f"{round(qd.get('emotion', 5), 1)}/10")
-                m_cols[2].metric("Attentiveness", f"{round(qd.get('engagement', 5), 1)}/10")
-                m_cols[3].metric("Face Visible", f"{100 - qd.get('absence', 0) * 100:.0f}%")
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("Answer Quality", f"{round(qd.get('cognitive',5),1)}/10")
+                m2.metric("Emotional Tone", f"{round(qd.get('emotion',5),1)}/10")
+                m3.metric("Attentiveness",  f"{round(qd.get('engagement',5),1)}/10")
+                m4.metric("Face Visible",   f"{100-qd.get('absence',0)*100:.0f}%")
 
-                # Dimensions
                 dims = qd.get("dimensions", {})
                 if dims:
-                    st.markdown("**📊 Dimension Scores**")
-                    d_cols = st.columns(3)
+                    st.markdown("**Dimension Scores**")
                     d_items = [(k, v) for k, v in dims.items()
-                              if k in DIM_LABELS and isinstance(v, (int, float))]
-                    for j, (dim, val) in enumerate(d_items):
-                        d_cols[j % 3].metric(DIM_LABELS[dim], f"{val}/10")
-
+                               if k in DIM and isinstance(v, (int, float))]
+                    if d_items:
+                        dc = st.columns(3)
+                        for j, (dim, val) in enumerate(d_items):
+                            dc[j % 3].metric(DIM[dim], f"{val}/10")
                     if dims.get("summary"):
                         st.caption(f"💬 {dims['summary']}")
-                    
-                    k_col, i_col = st.columns(2)
+                    kc, ic = st.columns(2)
                     if dims.get("key_strength"):
-                        k_col.success(f"✅ {dims['key_strength']}")
+                        kc.success(f"✅ {dims['key_strength']}")
                     if dims.get("key_improvement"):
-                        i_col.warning(f"⚠️ {dims['key_improvement']}")
+                        ic.warning(f"⚠️ {dims['key_improvement']}")
 
-                # Speech
                 sb = qd.get("speech", {})
                 if sb:
-                    st.markdown("**🎙️ Speech Quality**")
-                    sb_cols = st.columns(3)
-                    sb_cols[0].metric("Emotion", f"{sb.get('emotion_model', 5)}/10")
-                    sb_cols[1].metric("Fluency", f"{sb.get('fluency_score', 5)}/10")
-                    sb_cols[2].metric("Voice Energy", f"{sb.get('voice_score', 5)}/10")
-                    
+                    st.markdown("**🎙️ Speech**")
+                    s1, s2, s3 = st.columns(3)
+                    s1.metric("Emotion",     f"{sb.get('emotion_model',5)}/10")
+                    s2.metric("Fluency",      f"{sb.get('fluency_score',5)}/10")
+                    s3.metric("Voice Energy", f"{sb.get('voice_score',5)}/10")
                     if sb.get("dominant_emotion"):
-                        st.caption(f"Dominant: **{sb['dominant_emotion'].capitalize()}**")
+                        st.caption(
+                            f"Dominant: **{sb['dominant_emotion'].capitalize()}**")
 
-                # Facial emotion
                 fe = qd.get("facial_emotion", {})
                 if fe and fe.get("breakdown"):
                     dominant = fe.get("dominant", "neutral")
@@ -1029,118 +662,108 @@ def _show_candidate_detail(session_id: int):
                         "sad": "Low energy", "angry": "Stressed",
                         "disgust": "Uncomfortable",
                     }
-                    emoji = EMOTION_EMOJI.get(dominant, "😐")
-                    st.markdown(f"**😶 Facial Emotion:** {emoji} {label_map.get(dominant, dominant.capitalize())}")
+                    st.markdown(
+                        f"**😶 Facial Emotion:** "
+                        f"{EMOTION_EMOJI.get(dominant,'😐')} "
+                        f"{label_map.get(dominant, dominant.capitalize())}")
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# REGISTERED STUDENTS VIEW
-# ═══════════════════════════════════════════════════════════════════════════
-
+# ─────────────────────────────────────────────
+# STUDENTS
+# ─────────────────────────────────────────────
 def _show_registered_students():
-    """Display registered student accounts and interview counts."""
-    
     st.markdown("### 👥 Registered Students")
-    
     users = get_all_users()
     if not users:
         st.info("No student accounts registered yet.")
         return
 
     sessions = get_all_sessions()
-    session_count = {}
+    sc_map = {}
     for s in sessions:
         if s.username:
-            session_count[s.username] = session_count.get(s.username, 0) + 1
+            sc_map[s.username] = sc_map.get(s.username, 0) + 1
 
     for u in users:
-        count = session_count.get(u.username, 0)
         with st.container(border=True):
-            col1, col2, col3 = st.columns([3, 1, 1])
-            col1.markdown(f"**{u.display_name or u.username}**  \n`{u.username}`")
-            col2.metric("Interviews", count)
-            col3.caption(u.created_at.strftime("%d %b %Y"))
+            c1, c2, c3 = st.columns([3, 1, 1])
+            c1.markdown(
+                f"**{u.display_name or u.username}**  \n`{u.username}`")
+            c2.metric("Interviews", sc_map.get(u.username, 0))
+            c3.caption(u.created_at.strftime("%d %b %Y"))
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# ANALYTICS VIEW
-# ═══════════════════════════════════════════════════════════════════════════
-
+# ─────────────────────────────────────────────
+# ANALYTICS
+# ─────────────────────────────────────────────
 def _show_analytics():
-    """Display advanced analytics dashboard."""
-    
     st.markdown("### 📈 Advanced Analytics")
-    
     sessions = get_all_sessions()
-    
     if not sessions:
-        st.info("No data available for analytics yet.")
+        st.info("No data yet.")
         return
 
-    # Performance distribution
-    col1, col2 = st.columns(2)
-    
-    with col1:
+    c1, c2 = st.columns(2)
+    with c1:
         st.markdown("#### Cognitive Score Distribution")
-        cog_scores = [s.cognitive_score or 5 for s in sessions]
-        fig_cog = go.Figure(go.Histogram(
-            x=cog_scores, nbinsx=8,
-            marker_color=COLORS["info"],
-            name="Cognitive Scores",
-        ))
-        fig_cog.update_layout(
-            xaxis_title="Score (out of 10)",
-            yaxis_title="Candidates",
-            height=300,
-            showlegend=False,
-        )
-        st.plotly_chart(fig_cog, use_container_width=True)
+        fig = go.Figure(go.Histogram(
+            x=[s.cognitive_score or 5 for s in sessions], nbinsx=8,
+            marker_color=C["info"]))
+        fig.update_layout(height=280, showlegend=False,
+                          xaxis_title="Score /10", yaxis_title="Count",
+                          plot_bgcolor="rgba(0,0,0,0)",
+                          paper_bgcolor="rgba(0,0,0,0)",
+                          margin=dict(t=10, b=30))
+        st.plotly_chart(fig, use_container_width=True)
 
-    with col2:
+    with c2:
         st.markdown("#### Overall Score Distribution")
-        final_scores = [s.final_score or 0 for s in sessions]
-        fig_final = go.Figure(go.Histogram(
-            x=final_scores, nbinsx=10,
-            marker_color=COLORS["success"],
-            name="Final Scores",
-        ))
-        fig_final.update_layout(
-            xaxis_title="Score (out of 100)",
-            yaxis_title="Candidates",
-            height=300,
-            showlegend=False,
-        )
-        st.plotly_chart(fig_final, use_container_width=True)
+        fig2 = go.Figure(go.Histogram(
+            x=[s.final_score or 0 for s in sessions], nbinsx=10,
+            marker_color=C["primary"]))
+        fig2.update_layout(height=280, showlegend=False,
+                           xaxis_title="Score /100", yaxis_title="Count",
+                           plot_bgcolor="rgba(0,0,0,0)",
+                           paper_bgcolor="rgba(0,0,0,0)",
+                           margin=dict(t=10, b=30))
+        st.plotly_chart(fig2, use_container_width=True)
 
-    # Signal comparison
     st.markdown("---")
-    st.markdown("#### Signal Comparison")
-    
+    st.markdown("#### Average Signal Comparison")
+    n = len(sessions)
     signals = {
-        "Answer Quality": sum(s.cognitive_score or 0 for s in sessions) / len(sessions),
-        "Emotional Tone": sum(s.emotion_score or 0 for s in sessions) / len(sessions),
-        "Attentiveness": sum(s.engagement_score or 0 for s in sessions) / len(sessions),
+        "Answer Quality": sum(s.cognitive_score  or 0 for s in sessions) / n,
+        "Emotional Tone": sum(s.emotion_score    or 0 for s in sessions) / n,
+        "Attentiveness":  sum(s.engagement_score or 0 for s in sessions) / n,
     }
-    
-    fig_signals = go.Figure(go.Bar(
-        x=list(signals.keys()),
-        y=list(signals.values()),
-        marker_color=[COLORS["info"], COLORS["accent"], COLORS["success"]],
+    fig3 = go.Figure(go.Bar(
+        x=list(signals.keys()), y=list(signals.values()),
+        marker_color=[C["info"], C["accent"], C["primary"]],
         text=[f"{v:.1f}/10" for v in signals.values()],
-        textposition="outside",
-    ))
-    fig_signals.update_layout(
-        yaxis=dict(range=[0, 10]),
-        yaxis_title="Average Score",
-        showlegend=False,
-        height=300,
-    )
-    st.plotly_chart(fig_signals, use_container_width=True)
+        textposition="outside"))
+    fig3.update_layout(yaxis=dict(range=[0, 10], title="Avg /10"),
+                       height=300, showlegend=False,
+                       plot_bgcolor="rgba(0,0,0,0)",
+                       paper_bgcolor="rgba(0,0,0,0)",
+                       margin=dict(t=10, b=30))
+    st.plotly_chart(fig3, use_container_width=True)
 
+    st.markdown("---")
+    st.markdown("#### Verdict Breakdown")
+    vc = {"Strong Advance": 0, "Advance": 0,
+          "Borderline": 0,    "Do Not Advance": 0}
+    for s in sessions:
+        v = _verdict_from_score(s.cognitive_score or 5.0)
+        vc[v] = vc.get(v, 0) + 1
 
-# ═══════════════════════════════════════════════════════════════════════════
-# ENTRY POINT
-# ═══════════════════════════════════════════════════════════════════════════
+    fig4 = go.Figure(go.Pie(
+        labels=list(vc.keys()), values=list(vc.values()),
+        marker_colors=[C["primary"], C["secondary"], C["accent"], C["danger"]],
+        hole=0.4))
+    fig4.update_layout(height=300, margin=dict(t=10, b=10),
+                       paper_bgcolor="rgba(0,0,0,0)")
+    st.plotly_chart(fig4, use_container_width=True)
+
 
 if __name__ == "__main__":
     show_recruiter_dashboard()

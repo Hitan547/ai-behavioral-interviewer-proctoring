@@ -17,10 +17,14 @@ Logic: UNCHANGED from v3.
 import streamlit as st
 import requests
 import time
-
-from database import init_db, verify_login, register_student, save_session, get_all_sessions
+from config import (
+    ANSWER_SERVICE_URL, FUSION_SERVICE_URL,
+    EMOTION_SERVICE_URL, INSIGHT_SERVICE_URL,
+    N8N_RESULT_WEBHOOK
+)
+from whisper_audio import save_audio_frames_to_wav, transcribe_wav, record_answer_background
+from database import init_db, verify_login, register_student, save_session, get_all_sessions, get_profile_by_username, update_interview_status
 from recruiter_dashboard import show_recruiter_dashboard
-from whisper_audio import record_answer_background
 from voice_question import speak_question
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, WebRtcMode
 from engagement_realtime import EngagementDetector
@@ -32,7 +36,8 @@ st.set_page_config(
     page_title="PsySense — AI Interview",
     page_icon="🧠",
     layout="wide",
-    initial_sidebar_state="collapsed",
+    initial_sidebar_state="expanded",
+
 )
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -97,7 +102,7 @@ section.main { background: var(--bg) !important; }
 [data-testid="stSidebar"] {
   background: var(--surface) !important;
   border-right: 1px solid var(--border) !important;
-  min-width: 220px !important; max-width: 220px !important;
+  min-width: 260px !important; max-width: 260px !important;
 }
 [data-testid="stSidebar"] .stButton > button { width: 100% !important; font-size: 13px !important; }
 
@@ -390,6 +395,7 @@ RECORD_TIME = 60
 _D = {
     "logged_in": False, "user_role": None,
     "auth_username": "", "auth_display_name": "",
+    "org_id": None,
     "recruiter_detail_id": None, "recruiter_view_users": False,
     "phase": "start", "q_index": 0,
     "candidate_name": "", "questions": [], "resume_text": "", "jd_text": "",
@@ -399,6 +405,8 @@ _D = {
     "record_container": {"text": "", "done": False, "wav_path": None, "duration": 60},
     "answer_input": "",
     "cognitive_scores": [], "emotion_scores": [], "engagement_scores": [],
+    "jd_id": None,
+    "audio_frames": [],   # collects browser audio frames during recording 
     "absence_ratios": [], "low_presence_flags": [],
     "question_history": [], "answer_history": [],
     "recruiter_verdicts": [], "dimension_scores": [],
@@ -433,89 +441,29 @@ def _new_interview():
 # LOGIN
 # ══════════════════════════════════════════════════════════════════════════
 if not st.session_state.logged_in:
-    _, col, _ = st.columns([1, 1.2, 1])
-    with col:
-        st.markdown("<div style='height:48px'></div>", unsafe_allow_html=True)
-        st.markdown("""
-        <div style="text-align:center;margin-bottom:32px">
-          <div style="width:56px;height:56px;background:var(--navy-mid);border-radius:16px;
-               display:inline-flex;align-items:center;justify-content:center;
-               font-size:18px;font-weight:800;color:#fff;margin-bottom:14px;
-               box-shadow:0 6px 24px rgba(15,15,30,0.28)">PS</div>
-          <div style="font-size:22px;font-weight:800;color:var(--text);letter-spacing:-0.5px">PsySense</div>
-          <div style="font-size:13px;color:var(--muted);margin-top:5px">AI-powered behavioral interview platform</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-        st.markdown('<div class="ps-card" style="padding:24px 26px">', unsafe_allow_html=True)
-        tab_in, tab_reg = st.tabs(["Sign In", "Create Account"])
-
-        with tab_in:
-            st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
-            with st.form("login_form"):
-                l_user = st.text_input("Username", placeholder="your_username")
-                l_pass = st.text_input("Password", type="password", placeholder="••••••••")
-                st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
-                submitted = st.form_submit_button("Sign In →", type="primary", use_container_width=True)
-            if submitted:
-                if not l_user or not l_pass:
-                    st.warning("Please enter both username and password.")
-                else:
-                    user = verify_login(l_user.strip(), l_pass)
-                    if user:
-                        st.session_state.logged_in         = True
-                        st.session_state.user_role         = user["role"]
-                        st.session_state.auth_username     = user["username"]
-                        st.session_state.auth_display_name = user["display_name"]
-                        if user["role"] == "student":
-                            st.session_state.candidate_name = user["display_name"]
-                        st.rerun()
-                    else:
-                        st.error("Incorrect username or password.")
-
-            st.markdown("""
-            <div style="margin-top:16px;padding:11px 14px;background:var(--bg);
-                 border-radius:9px;border:1px solid var(--border)">
-              <div style="font-size:10px;color:#aaaabc;font-weight:700;
-                   text-transform:uppercase;letter-spacing:0.8px;margin-bottom:5px">Demo recruiter</div>
-              <div style="font-size:12px;color:var(--muted);font-family:var(--mono)">
-                user: <b style="color:var(--text)">recruiter</b>
-                &nbsp;·&nbsp; pass: <b style="color:var(--text)">admin123</b>
-              </div>
-            </div>
-            """, unsafe_allow_html=True)
-
-        with tab_reg:
-            st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
-            with st.form("register_form"):
-                r_name  = st.text_input("Full Name",        placeholder="Arjun Sharma")
-                r_user  = st.text_input("Username",         placeholder="arjun_sharma")
-                r_email = st.text_input("Email (optional)", placeholder="arjun@email.com")
-                r_pass  = st.text_input("Password",         type="password", placeholder="min 8 chars")
-                r_conf  = st.text_input("Confirm",          type="password", placeholder="repeat password")
-                st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
-                reg_sub = st.form_submit_button("Create Account →", use_container_width=True)
-            if reg_sub:
-                if not r_name or not r_user or not r_pass:
-                    st.warning("Name, username and password are required.")
-                elif r_pass != r_conf:
-                    st.error("Passwords do not match.")
-                else:
-                    ok, msg = register_student(r_user.strip(), r_pass, r_name.strip(), r_email.strip())
-                    (st.success if ok else st.error)(msg)
-        st.markdown('</div>', unsafe_allow_html=True)
+    from saas.saas_auth import show_saas_login_signup
+    show_saas_login_signup()
     st.stop()
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# SIDEBAR
+# RECRUITER DASHBOARD (must run before candidate sidebar — avoids st.sidebar conflict)
 # ══════════════════════════════════════════════════════════════════════════
+if st.session_state.user_role == "recruiter":
+    show_recruiter_dashboard()
+    st.stop()
+
+# ══════════════════════════════════════════════════════════════════════════
+# SIDEBAR — candidates only
+# ══════════════════════════════════════════════════════════════════════════
+st.markdown('<style>[data-testid="stSidebarNav"]{display:none!important}</style>',
+            unsafe_allow_html=True)
+
 with st.sidebar:
-    role_label = "🏢 Recruiter" if st.session_state.user_role == "recruiter" else "🎤 Candidate"
     st.markdown(f"""
     <div style="padding:6px 0 14px">
       <div style="font-size:10px;font-weight:700;color:#aaaabc;text-transform:uppercase;
-           letter-spacing:0.8px;margin-bottom:8px">{role_label}</div>
+           letter-spacing:0.8px;margin-bottom:8px">🎤 Candidate</div>
       <div style="font-size:15px;font-weight:700;color:var(--text);line-height:1.2">
         {st.session_state.auth_display_name}</div>
       <div style="font-size:12px;color:var(--muted);margin-top:3px">
@@ -523,31 +471,22 @@ with st.sidebar:
     </div>
     """, unsafe_allow_html=True)
     st.markdown("<hr>", unsafe_allow_html=True)
-    if st.session_state.user_role != "recruiter":
-        phase_map = {
-            "start": "Setting up", "camera_setup": "Camera check",
-            "prep": "Preparing", "recording": "Recording",
-            "processing": "Processing", "transcript": "Reviewing", "report": "Completed",
-        }
-        cur = phase_map.get(st.session_state.phase, "In progress")
-        st.markdown(f"""
-        <div style="padding:10px 12px;background:var(--bg);border-radius:9px;
-             border:1px solid var(--border);margin-bottom:14px">
-          <div style="font-size:10px;font-weight:600;color:#aaaabc;
-               text-transform:uppercase;letter-spacing:0.6px;margin-bottom:4px">Status</div>
-          <div style="font-size:13px;font-weight:600;color:var(--text)">{cur}</div>
-        </div>
-        """, unsafe_allow_html=True)
+    phase_map = {
+        "start": "Setting up", "camera_setup": "Camera check",
+        "prep": "Preparing", "recording": "Recording",
+        "processing": "Processing", "transcript": "Reviewing", "report": "Completed",
+    }
+    cur = phase_map.get(st.session_state.phase, "In progress")
+    st.markdown(f"""
+    <div style="padding:10px 12px;background:var(--bg);border-radius:9px;
+         border:1px solid var(--border);margin-bottom:14px">
+      <div style="font-size:10px;font-weight:600;color:#aaaabc;
+           text-transform:uppercase;letter-spacing:0.6px;margin-bottom:4px">Status</div>
+      <div style="font-size:13px;font-weight:600;color:var(--text)">{cur}</div>
+    </div>
+    """, unsafe_allow_html=True)
     if st.button("🚪  Logout", use_container_width=True, key="sb_logout"):
         _logout()
-
-if st.session_state.user_role != "recruiter":
-    st.markdown('<style>[data-testid="stSidebarNav"]{display:none!important}</style>',
-                unsafe_allow_html=True)
-
-if st.session_state.user_role == "recruiter":
-    show_recruiter_dashboard()
-    st.stop()
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -681,14 +620,14 @@ elif phase == "report":
     avg_eng = sum(st.session_state.engagement_scores)/ max(len(st.session_state.engagement_scores), 1)
 
     try:
-        fr = requests.post("http://127.0.0.1:8001/fuse",
+        fr = requests.post(f"{FUSION_SERVICE_URL}/fuse",
             json={"cognitive_score": avg_cog, "emotion_score": avg_emo,
                   "engagement_score": avg_eng}, timeout=10).json()
     except:
         fr = {"final_behavioral_score": round((0.5*avg_cog + 0.3*avg_emo + 0.2*avg_eng)*10, 1)}
 
     try:
-        ir = requests.post("http://127.0.0.1:8003/generate_insight",
+        ir = requests.post(f"{INSIGHT_SERVICE_URL}/generate_insight",
             json={"avg_cognitive": avg_cog, "avg_emotion": avg_emo,
                   "avg_engagement": avg_eng, "final_score": fr["final_behavioral_score"]},
             timeout=30).json()
@@ -717,21 +656,52 @@ elif phase == "report":
             final_score=final_score, cognitive_score=avg_cog, emotion_score=avg_emo,
             engagement_score=avg_eng, questions_answered=len(st.session_state.question_history),
             insight_data=ir, per_question_data=pq, jd_used=bool(st.session_state.get("jd_text")),
-            recruiter_verdicts=st.session_state.recruiter_verdicts)
+            recruiter_verdicts=st.session_state.recruiter_verdicts,
+            jd_id=st.session_state.get("jd_id"))
         st.session_state.session_saved    = True
         st.session_state.saved_session_id = sid
-
+        if st.session_state.get("org_id"):
+            from saas.saas_db import increment_interview_count, reset_monthly_quota
+            reset_monthly_quota(st.session_state.org_id)
+            increment_interview_count(st.session_state.org_id)
         if not st.session_state.get("webhook_sent", False):
             try:
                 import datetime as _dt
-                requests.post("http://localhost:5678/webhook/psysense-interview", json={
-                    "candidate_name": st.session_state.candidate_name, "final_score": final_score,
-                    "cognitive_score": round(avg_cog,1), "emotion_score": round(avg_emo,1),
-                    "engagement_score": round(avg_eng,1),
-                    "questions_answered": len(st.session_state.question_history),
-                    "flagged": final_score < 50, "status": "Pending",
-                    "interview_date": _dt.datetime.now().strftime("%d %b %Y, %H:%M"),
-                    "username": st.session_state.auth_username}, timeout=5)
+                from database import get_job_posting_by_id
+
+                jd_id      = st.session_state.get("jd_id")
+                should_fire = True
+                to_email    = None
+
+                if jd_id:
+                    # JD-linked interview — only fire if score >= threshold
+                    posting = get_job_posting_by_id(jd_id)
+                    if posting:
+                        should_fire = final_score >= posting.min_pass_score
+                        to_email    = posting.recruiter_email
+
+                if should_fire:
+                    payload = {
+                        "candidate_name":    st.session_state.candidate_name,
+                        "final_score":       final_score,
+                        "cognitive_score":   round(avg_cog, 1),
+                        "emotion_score":     round(avg_emo, 1),
+                        "engagement_score":  round(avg_eng, 1),
+                        "questions_answered": len(st.session_state.question_history),
+                        "flagged":           final_score < 50,
+                        "status":            "Passed" if jd_id else "Pending",
+                        "interview_date":    _dt.datetime.now().strftime("%d %b %Y, %H:%M"),
+                        "username":          st.session_state.auth_username,
+                        "recruiter_email":   to_email,
+                    }
+                    requests.post(
+                        N8N_RESULT_WEBHOOK,
+                        json=payload, timeout=5
+                    )
+                    print(f"[n8n] ✅ Result email sent — score {final_score}", flush=True)
+                else:
+                    print(f"[n8n] ⏭ Below threshold ({final_score}) — no email sent", flush=True)
+
                 st.session_state.webhook_sent = True
             except Exception as _e:
                 print(f"[n8n] ⚠️ Webhook failed: {_e}", flush=True)
@@ -840,7 +810,7 @@ else:
             key="engagement",
             mode=WebRtcMode.SENDRECV,
             video_processor_factory=EngagementProcessor,
-            media_stream_constraints={"video": True, "audio": False},
+            media_stream_constraints={"video": True, "audio": True},
             async_processing=True,
         )
         stream_ok = ctx.state.playing and ctx.video_processor is not None
@@ -949,6 +919,12 @@ else:
                     Everything looks good — launching the interview…</div>
                 </div>""", unsafe_allow_html=True)
                 time.sleep(1.5)
+                if st.session_state.get("jd_id"):
+                    update_interview_status(
+                        st.session_state.auth_username,
+                        st.session_state.jd_id,
+                        "In Progress"
+                    )
                 go_to("prep")
             else:
                 st.markdown("""
@@ -1036,10 +1012,10 @@ else:
                     ctx.video_processor.set_countdown(None)
                 st.session_state.record_container = {
                     "text": "", "done": False, "wav_path": None, "duration": 60}
+                st.session_state.audio_frames = []  # clear before new recording
                 st.session_state.record_start = time.time()
                 if stream_ok:
                     ctx.video_processor.snapshot_and_reset()
-                record_answer_background(st.session_state.record_container, RECORD_TIME)
                 go_to("recording")
 
         # ── RECORDING ─────────────────────────────────────────────────
@@ -1094,6 +1070,17 @@ else:
                       </div>
                     </div>""", unsafe_allow_html=True)
                 st.progress((RECORD_TIME - remaining) / RECORD_TIME)
+
+                # collect audio frames from browser
+                if stream_ok and ctx.audio_receiver:
+                    try:
+                        audio_frames = ctx.audio_receiver.get_frames(timeout=0)
+                        for frame in audio_frames:
+                            arr = frame.to_ndarray()
+                            st.session_state.audio_frames.append(arr)
+                    except Exception:
+                        pass
+
                 time.sleep(1)
                 st.rerun()
             else:
@@ -1105,6 +1092,19 @@ else:
                 st.session_state.cur_engagement     = score
                 st.session_state.cur_absence        = absent
                 st.session_state.cur_facial_emotion = fem
+
+                # Save browser audio frames to WAV, then transcribe
+                frames = st.session_state.get("audio_frames", [])
+                if frames:
+                    wav_path = save_audio_frames_to_wav(frames, sample_rate=48000)
+                    transcribe_wav(wav_path, st.session_state.record_container, RECORD_TIME)
+                else:
+                    # fallback — no audio captured
+                    st.session_state.record_container["text"]     = ""
+                    st.session_state.record_container["wav_path"] = None
+                    st.session_state.record_container["done"]     = True
+
+                st.session_state.audio_frames = []  # clear for next question
                 go_to("processing")
 
         # ── PROCESSING ────────────────────────────────────────────────
@@ -1184,10 +1184,10 @@ else:
                         st.session_state.retry_used       = True
                         st.session_state.record_container = {
                             "text": "", "done": False, "wav_path": None, "duration": 60}
+                        st.session_state.audio_frames     = []  # clear old frames
                         st.session_state.record_start     = time.time()
                         if stream_ok:
                             ctx.video_processor.snapshot_and_reset()
-                        record_answer_background(st.session_state.record_container, RECORD_TIME)
                         go_to("recording")
                 else:
                     st.markdown(
@@ -1199,7 +1199,7 @@ else:
                        else f"Submit & Next Question ({q_num}/{q_tot}) →")
                 if st.button(lbl, type="primary", use_container_width=True):
                     try:
-                        er = requests.post("http://127.0.0.1:8000/evaluate_answer",
+                        er = requests.post(f"{ANSWER_SERVICE_URL}/evaluate_answer",
                             json={"question": q, "answer": ans,
                                   "jd_text": st.session_state.get("jd_text","")},
                             timeout=30).json()
@@ -1213,7 +1213,7 @@ else:
                     try:
                         _wav = st.session_state.record_container.get("wav_path")
                         _dur = st.session_state.record_container.get("duration", 60)
-                        _ej  = requests.post("http://127.0.0.1:8002/predict_detail",
+                        _ej = requests.post(f"{EMOTION_SERVICE_URL}/predict_detail",
                             json={"text": ans, "wav_path": _wav, "duration_seconds": _dur},
                             timeout=30).json()
                         emo  = float(_ej.get("emotion_score", 5.0))
