@@ -35,6 +35,11 @@ def root():
     }
 
 
+@app.get("/health")
+def health():
+    return {"status": "ok", "service": "emotion_service"}
+
+
 @app.post("/predict")
 def predict(req: EmotionRequest):
     score = predict_emotion_score(

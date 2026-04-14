@@ -1,17 +1,33 @@
 """
 saas_billing.py
 ---------------
-Simple Stripe integration for SaaS subscriptions.
-Minimal setup: checkout links + webhook handlers.
+Simple billing UI with optional Stripe integration.
+When Stripe is not installed, the page still works in local demo mode.
 """
 
-import stripe
 import os
-from saas_db import get_organization, upgrade_plan, handle_stripe_webhook
 from datetime import datetime
 
-# Initialize Stripe API
-stripe.api_key = os.getenv("STRIPE_API_KEY", "sk_test_your_key_here")
+try:
+    import stripe  # type: ignore
+    STRIPE_AVAILABLE = True
+except ImportError:
+    stripe = None
+    STRIPE_AVAILABLE = False
+
+from saas.saas_db import (
+    SessionLocal,
+    Organization,
+    get_organization,
+    get_usage_stats,
+    init_saas_db,
+    upgrade_plan,
+    get_subscription_logs,
+)
+
+# Initialize Stripe API only when installed
+if STRIPE_AVAILABLE:
+    stripe.api_key = os.getenv("STRIPE_API_KEY", "")
 
 # Stripe product/price IDs — configure these in Stripe dashboard
 PLANS = {
@@ -41,6 +57,9 @@ def create_checkout_session(org_id: str, plan: str) -> str:
     Create a Stripe checkout session for plan upgrade.
     Returns the checkout URL.
     """
+    if not STRIPE_AVAILABLE:
+        raise RuntimeError("Stripe SDK not installed. Running billing in demo mode.")
+
     org = get_organization(org_id)
     if not org:
         raise ValueError("Organization not found")
@@ -55,9 +74,16 @@ def create_checkout_session(org_id: str, plan: str) -> str:
             name=org.org_name,
             metadata={"org_id": org_id}
         )
-        # Update org with customer ID (you'd do this in a transaction in production)
-        db_org = get_organization(org_id)
-        # Note: In production, use SQLAlchemy session to update
+        # Persist customer ID so later checkouts can reuse it.
+        db = SessionLocal()
+        try:
+            db_org = db.query(Organization).filter_by(org_id=org_id).first()
+            if db_org:
+                db_org.stripe_customer_id = customer["id"]
+                db_org.updated_at = datetime.utcnow()
+                db.commit()
+        finally:
+            db.close()
     else:
         customer = {"id": org.stripe_customer_id}
     
@@ -86,6 +112,9 @@ def handle_subscription_webhook(event: dict) -> bool:
     Handle Stripe webhook events.
     Main events: customer.subscription.updated, customer.subscription.deleted
     """
+    if not STRIPE_AVAILABLE:
+        return False
+
     event_type = event.get("type")
     data = event.get("data", {}).get("object", {})
     org_id = data.get("metadata", {}).get("org_id")
@@ -108,19 +137,17 @@ def handle_subscription_webhook(event: dict) -> bool:
     
     elif event_type == "customer.subscription.deleted":
         # Mark org as inactive
-        org = get_organization(org_id)
-        if org:
-            from saas_db import SessionLocal
-            db = SessionLocal()
-            try:
-                db.query(get_organization.__module__.Organization).filter_by(
-                    org_id=org_id
-                ).update({"active": 0})
+        db = SessionLocal()
+        try:
+            org = db.query(Organization).filter_by(org_id=org_id).first()
+            if org:
+                org.active = 0
+                org.updated_at = datetime.utcnow()
                 db.commit()
-                print(f"[Stripe] ❌ {org_id} subscription cancelled")
-            finally:
-                db.close()
-            return True
+                print(f"[Stripe] subscription cancelled for {org_id}")
+                return True
+        finally:
+            db.close()
     
     return False
 
@@ -131,8 +158,8 @@ def show_billing_page(org_id: str):
     Shows current plan, usage, and upgrade options.
     """
     import streamlit as st
-    from saas_db import get_usage_stats
-    
+
+    init_saas_db()
     org = get_organization(org_id)
     stats = get_usage_stats(org_id)
     
@@ -141,6 +168,9 @@ def show_billing_page(org_id: str):
         return
     
     st.title("💳 Billing & Plan")
+
+    if not STRIPE_AVAILABLE:
+        st.info("Demo billing mode active: Stripe is not installed yet. Local subscription tables are enabled.")
     
     # Current plan
     col1, col2, col3 = st.columns(3)
@@ -234,3 +264,26 @@ def show_billing_page(org_id: str):
     with usage_col2:
         st.write(f"**Billing period:** {org.current_month}")
         st.write(f"**Last updated:** {org.updated_at.strftime('%Y-%m-%d %H:%M')}")
+
+    st.markdown("---")
+    st.subheader("Subscription History")
+    logs = get_subscription_logs(org_id, limit=25)
+    rows = []
+    for log in logs:
+        rows.append({
+            "Date": log.created_at.strftime("%Y-%m-%d %H:%M") if log.created_at else "-",
+            "Event": log.event_type or "-",
+            "From": log.old_plan or "-",
+            "To": log.new_plan or "-",
+            "Stripe Ref": log.stripe_event_id or "-",
+        })
+    if not rows:
+        rows.append({
+            "Date": datetime.utcnow().strftime("%Y-%m-%d %H:%M"),
+            "Event": "current_state",
+            "From": "-",
+            "To": org.subscription_plan or "trial",
+            "Stripe Ref": "demo-mode",
+        })
+        st.caption("No real subscription events yet. Showing current billing state.")
+    st.dataframe(rows, use_container_width=True, hide_index=True)

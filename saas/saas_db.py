@@ -10,7 +10,7 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 from datetime import datetime, timedelta
 import uuid, os, json
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///data/psysense.db")
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./psysense.db")
 if DATABASE_URL.startswith("sqlite:///"):
     _db_path = DATABASE_URL.replace("sqlite:///", "")
     _db_dir  = os.path.dirname(_db_path)
@@ -298,6 +298,21 @@ def get_usage_stats(org_id: str) -> dict:
             "trial_expires_at": org.trial_expires_at.isoformat() if org.trial_expires_at else None,
             "is_expired": is_trial_expired(org_id),
         }
+    finally:
+        db.close()
+
+
+def get_subscription_logs(org_id: str, limit: int = 20):
+    """Return recent subscription events for billing history UI."""
+    db = SessionLocal()
+    try:
+        return (
+            db.query(SubscriptionLog)
+            .filter_by(org_id=org_id)
+            .order_by(SubscriptionLog.created_at.desc())
+            .limit(limit)
+            .all()
+        )
     finally:
         db.close()
 

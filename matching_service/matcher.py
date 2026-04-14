@@ -15,17 +15,51 @@ import os
 import json
 import time
 import re
+from pathlib import Path
 from groq import Groq
 from dotenv import load_dotenv
 
-load_dotenv()
+_HERE = Path(__file__).resolve().parent
+_ENV_PATH = _HERE.parent / ".env"
+if _ENV_PATH.exists():
+    load_dotenv(dotenv_path=_ENV_PATH, override=False)
+else:
+    load_dotenv()
+
+_api_key = (os.getenv("GROQ_API_KEY") or "").strip()
+if not _api_key and _ENV_PATH.exists():
+    load_dotenv(dotenv_path=_ENV_PATH, override=True)
+    _api_key = (os.getenv("GROQ_API_KEY") or "").strip()
+
+if not _api_key:
+    raise EnvironmentError("GROQ_API_KEY is not set. Add it in project .env")
 
 # Use GROQ_API_KEY (same as answer_service)
-client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+client = Groq(api_key=_api_key)
 
 MODEL    = "llama-3.1-8b-instant"
 TEMP     = 0.2
 RATE_DELAY = 0.6   # seconds between calls — avoids Groq rate limit
+EMAIL_REGEX = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+
+
+def _groq_json_completion(messages: list, max_tokens: int, retries: int = 2):
+    """Call Groq with JSON mode and a small retry budget for transient failures."""
+    last_error = None
+    for attempt in range(retries + 1):
+        try:
+            return client.chat.completions.create(
+                model=MODEL,
+                temperature=TEMP,
+                max_tokens=max_tokens,
+                response_format={"type": "json_object"},
+                messages=messages,
+            )
+        except Exception as e:
+            last_error = e
+            if attempt < retries:
+                time.sleep(0.8)
+    raise last_error
 
 
 # ── Prompts ───────────────────────────────────────────────────────────────
@@ -82,15 +116,50 @@ def _safe_parse(text: str) -> dict:
         cleaned = cleaned.strip("`").strip()
         return json.loads(cleaned)
     except Exception:
+        # Fallback: extract first JSON object from mixed text responses.
+        try:
+            cleaned = re.sub(r"```(?:json)?", "", text or "").strip()
+            start = cleaned.find("{")
+            end = cleaned.rfind("}")
+            if start != -1 and end != -1 and end > start:
+                return json.loads(cleaned[start : end + 1])
+        except Exception:
+            pass
         return {}
+
+
+def _extract_email_regex(resume_text: str) -> str:
+    """Extract first valid-looking email from plain text."""
+    m = EMAIL_REGEX.search(resume_text or "")
+    return m.group(0).strip() if m else ""
+
+
+def _extract_name_regex(resume_text: str) -> str:
+    """Best-effort name extraction from top resume lines when LLM fails."""
+    lines = [ln.strip() for ln in (resume_text or "").splitlines() if ln.strip()]
+    for ln in lines[:20]:
+        lower = ln.lower()
+        if "@" in ln:
+            continue
+        if any(tok in lower for tok in ["resume", "curriculum", "summary", "objective", "education"]):
+            continue
+        if len(ln) > 60:
+            continue
+
+        words = [w for w in re.split(r"\s+", ln) if w]
+        alpha_words = [w for w in words if re.match(r"^[A-Za-z][A-Za-z'\-.]*$", w)]
+        if len(alpha_words) >= 2:
+            return " ".join(alpha_words[:4]).strip()
+    return ""
 
 
 def _extract_candidate_info(resume_text: str) -> dict:
     """Extract name and email from resume using LLM."""
+    fallback_email = _extract_email_regex(resume_text)
+    fallback_name = _extract_name_regex(resume_text)
+
     try:
-        response = client.chat.completions.create(
-            model=MODEL,
-            temperature=TEMP,
+        response = _groq_json_completion(
             max_tokens=200,
             messages=[
                 {"role": "system", "content": EXTRACT_SYSTEM},
@@ -100,12 +169,23 @@ def _extract_candidate_info(resume_text: str) -> dict:
             ],
         )
         result = _safe_parse(response.choices[0].message.content)
+        name = (result.get("name") or "").strip()
+        email = (result.get("email") or "").strip()
+
+        if not email or email.lower().startswith("unknown@"):
+            email = fallback_email or "unknown@email.com"
+        if not name or name.lower() == "unknown":
+            name = fallback_name or "Unknown"
+
         return {
-            "name":  result.get("name",  "Unknown"),
-            "email": result.get("email", "unknown@email.com"),
+            "name":  name,
+            "email": email,
         }
     except Exception:
-        return {"name": "Unknown", "email": "unknown@email.com"}
+        return {
+            "name": fallback_name or "Unknown",
+            "email": fallback_email or "unknown@email.com",
+        }
 
 
 # ── Public functions ──────────────────────────────────────────────────────
@@ -135,9 +215,7 @@ def score_resume_vs_jd(resume_text: str, jd_text: str) -> dict:
 
     try:
         # Step 1: Score the resume vs JD
-        response = client.chat.completions.create(
-            model=MODEL,
-            temperature=TEMP,
+        response = _groq_json_completion(
             max_tokens=600,
             messages=[
                 {"role": "system", "content": MATCH_SYSTEM},
@@ -152,7 +230,13 @@ def score_resume_vs_jd(resume_text: str, jd_text: str) -> dict:
         parsed = _safe_parse(raw)
 
         if not parsed or "match_score" not in parsed:
-            return fallback
+            info = _extract_candidate_info(resume_text)
+            return {
+                **fallback,
+                "name": info.get("name", "Unknown"),
+                "email": info.get("email", "unknown@email.com"),
+                "match_reason": "LLM parse failed. Check GROQ key/quota or resume text quality.",
+            }
 
         # Step 2: Extract name + email
         info = _extract_candidate_info(resume_text)
@@ -168,7 +252,10 @@ def score_resume_vs_jd(resume_text: str, jd_text: str) -> dict:
 
     except Exception as e:
         print(f"[matcher] score_resume_vs_jd error: {e}")
-        return fallback
+        return {
+            **fallback,
+            "match_reason": f"LLM call failed: {str(e)[:140]}",
+        }
 
 
 def score_all_resumes(resumes: list[dict], jd_text: str) -> list[dict]:

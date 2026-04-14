@@ -25,14 +25,15 @@ V2 additions:
 
 from sqlalchemy import (
     create_engine, Column, Integer, String, Float,
-    DateTime, Boolean, Text, ForeignKey
+    DateTime, Boolean, Text, ForeignKey, func
 )
 from sqlalchemy.orm import declarative_base, sessionmaker
 from datetime import datetime
 import os, json, hashlib, random, string
 import bcrypt
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///data/psysense.db")
+# Keep the default DB path consistent with .env and manual Streamlit runs.
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./psysense.db")
 
 if DATABASE_URL.startswith("sqlite:///"):
     _db_path = DATABASE_URL.replace("sqlite:///", "")
@@ -183,35 +184,67 @@ def init_db():
 # ── Auth ──────────────────────────────────────────────────────────────────
 
 def verify_login(username: str, password: str):
+    # Be tolerant of copy-pasted credentials from email/chat clients.
+    def _clean_cred(value: str) -> str:
+        v = (value or "")
+        for ch in ("\u200b", "\ufeff", "\xa0"):
+            v = v.replace(ch, "")
+        v = v.strip()
+        if len(v) >= 2 and v[0] == v[-1] and v[0] in ('"', "'", "`"):
+            v = v[1:-1].strip()
+        return v
+
+    username = _clean_cred(username)
+    password = _clean_cred(password)
+    if not username or not password:
+        return None
+
     db = SessionLocal()
     try:
-        # Accept email OR username
-        user = db.query(User).filter_by(username=username).first()
-        if not user:
-            user = db.query(User).filter_by(email=username).first()
-        if not user:
+        # Accept username or email (case-insensitive).
+        username_lc = username.casefold()
+        user = (
+            db.query(User)
+            .filter(func.lower(User.username) == username_lc)
+            .order_by(User.id.desc())
+            .first()
+        )
+
+        def _auth_ok(u: User) -> bool:
+            if _verify_hash(password, u.password_hash):
+                return True
+            # Fallback: SHA256 for any accounts created before bcrypt migration
+            import hashlib
+            return hashlib.sha256(password.encode()).hexdigest() == u.password_hash
+
+        if user:
+            # If a username was provided, authenticate against that exact account only.
+            if _auth_ok(user):
+                return {
+                    "id":           user.id,
+                    "username":     user.username,
+                    "role":         user.role,
+                    "display_name": user.display_name or user.username,
+                    "email":        user.email,
+                }
             return None
 
-        # bcrypt check
-        if _verify_hash(password, user.password_hash):
-            return {
-                "id":           user.id,
-                "username":     user.username,
-                "role":         user.role,
-                "display_name": user.display_name or user.username,
-                "email":        user.email,
-            }
+        # Email login path: multiple accounts can share the same email.
+        candidates = db.query(User).filter(func.lower(User.email) == username_lc).all()
+        if not candidates:
+            return None
 
-        # Fallback: SHA256 for any accounts created before bcrypt migration
-        import hashlib
-        if hashlib.sha256(password.encode()).hexdigest() == user.password_hash:
-            return {
-                "id":           user.id,
-                "username":     user.username,
-                "role":         user.role,
-                "display_name": user.display_name or user.username,
-                "email":        user.email,
-            }
+        # Prefer recruiter when several accounts share one email.
+        ordered = sorted(candidates, key=lambda u: 0 if u.role == "recruiter" else 1)
+        for u in ordered:
+            if _auth_ok(u):
+                return {
+                    "id":           u.id,
+                    "username":     u.username,
+                    "role":         u.role,
+                    "display_name": u.display_name or u.username,
+                    "email":        u.email,
+                }
 
         return None
     finally:
@@ -465,19 +498,65 @@ def create_candidate_account(profile_id: int) -> dict:
             return {"error": "Profile not found"}
 
         if profile.account_created:
-            return {"username": profile.username, "already_existed": True}
+            # Re-invite path: return existing credentials when available.
+            # If the temp password was cleared, rotate to a fresh one.
+            existing_password = profile.temp_password
+            if not existing_password:
+                existing_password = _random_password(8)
+                user = db.query(User).filter(User.username == profile.username).first()
+                if not user:
+                    return {"error": "User not found for existing profile"}
+                user.password_hash = _hash(existing_password)
+                profile.temp_password = existing_password
+                db.commit()
 
-        username = _generate_username(profile.name)
-        password = _random_password(8)
+            return {
+                "username": profile.username,
+                "password": existing_password,
+                "already_existed": True,
+            }
 
-        # Create Users entry
-        db.add(User(
-            username      = username,
-            password_hash = _hash(password),
-            role          = "student",
-            display_name  = profile.name,
-            email         = profile.email,
-        ))
+        password = None
+
+        # Reuse latest student account for same email to avoid multiple usernames
+        # being emailed for the same person across repeated invites.
+        existing_student = None
+        if profile.email:
+            existing_student = (
+                db.query(User)
+                .filter(User.email == profile.email, User.role == "student")
+                .order_by(User.id.desc())
+                .first()
+            )
+
+        if existing_student:
+            username = existing_student.username
+            # Keep credentials stable across repeated invites for the same student.
+            # Reuse the latest known temp_password for this username when available.
+            prior_profile = (
+                db.query(CandidateProfile)
+                .filter(
+                    CandidateProfile.username == username,
+                    CandidateProfile.temp_password != None,
+                )
+                .order_by(CandidateProfile.id.desc())
+                .first()
+            )
+            password = prior_profile.temp_password if prior_profile and prior_profile.temp_password else _random_password(8)
+            # Ensure stored hash always matches the credential being sent.
+            existing_student.password_hash = _hash(password)
+            if profile.name:
+                existing_student.display_name = profile.name
+        else:
+            password = _random_password(8)
+            username = _generate_username(profile.name)
+            db.add(User(
+                username      = username,
+                password_hash = _hash(password),
+                role          = "student",
+                display_name  = profile.name,
+                email         = profile.email,
+            ))
 
         # Update profile
         profile.username        = username
@@ -486,7 +565,11 @@ def create_candidate_account(profile_id: int) -> dict:
         profile.interview_status = "Invited"
 
         db.commit()
-        return {"username": username, "password": password}
+        return {
+            "username": username,
+            "password": password,
+            "reused_account": bool(existing_student),
+        }
     finally:
         db.close()
 

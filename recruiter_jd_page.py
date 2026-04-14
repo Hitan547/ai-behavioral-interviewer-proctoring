@@ -14,6 +14,7 @@ import io
 import os
 import json
 import time
+import re
 import requests
 import streamlit as st
 from datetime import datetime, date
@@ -25,6 +26,7 @@ from database import (
     save_job_posting,
     save_candidate_profile,
     create_candidate_account,
+    verify_login,
     mark_invite_sent,
     get_all_job_postings,
     get_job_posting_by_id,
@@ -54,6 +56,20 @@ STATUS_COLORS = {
     "Expired":         "⚫",
 }
 
+EMAIL_REGEX = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
+
+
+def _is_valid_email(email: str) -> bool:
+    return bool(EMAIL_REGEX.match((email or "").strip()))
+
+
+def _is_strong_shortlist_candidate(candidate: dict, min_match_score: float = 7.0) -> bool:
+    """Auto-select only strong JD matches with usable identity info."""
+    score = float(candidate.get("match_score") or 0)
+    name = (candidate.get("name") or "").strip().lower()
+    email = (candidate.get("email") or "").strip()
+    return score >= min_match_score and name not in ("", "unknown") and _is_valid_email(email)
+
 
 # ── PDF Extraction ────────────────────────────────────────────────────────
 
@@ -79,11 +95,11 @@ def send_invite_via_n8n(
     password:   str,
     job_title:  str,
     deadline:   str,
-) -> bool:
+) -> tuple[bool, str]:
     """
     POST candidate credentials to n8n webhook.
     n8n then sends the Gmail invite email.
-    Returns True if webhook call succeeded.
+    Returns (success, message).
     """
     try:
         payload = {
@@ -96,10 +112,14 @@ def send_invite_via_n8n(
             "deadline":   deadline,
         }
         response = requests.post(N8N_INVITE_WEBHOOK, json=payload, timeout=10)
-        return response.status_code in (200, 201)
+        if 200 <= response.status_code < 300:
+            return True, "Webhook accepted"
+
+        detail = response.text.strip()[:200] if response.text else "no response body"
+        return False, f"HTTP {response.status_code}: {detail}"
     except Exception as e:
         print(f"[jd_page] n8n webhook error for {email}: {e}")
-        return False
+        return False, str(e)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -144,6 +164,15 @@ def _show_new_posting_tab():
             min_value=0, max_value=100, value=60,
             key="jd_min_score",
             help="Candidates scoring above this after interview get reported to you",
+        )
+        shortlist_threshold = st.number_input(
+            "Shortlist Match Threshold (/10)",
+            min_value=0.0,
+            max_value=10.0,
+            value=7.0,
+            step=0.5,
+            key="jd_shortlist_threshold",
+            help="Auto-select resumes at or above this JD match score",
         )
 
     jd_text = st.text_area(
@@ -208,6 +237,7 @@ def _show_new_posting_tab():
             result = score_resume_vs_jd(resume["text"], jd_text)
             result["filename"] = resume["filename"]
             result["resume_text"] = resume["text"]
+            result["row_id"] = f"{resume['filename']}::{i}"
             results.append(result)
             if i < len(resumes) - 1:
                 time.sleep(0.6)
@@ -222,7 +252,12 @@ def _show_new_posting_tab():
         st.session_state.jd_text_input       = jd_text
         st.session_state.jd_min_score_input  = min_pass_score
         st.session_state.jd_deadline_input   = deadline_date
-        st.session_state.jd_selections       = {r["filename"]: True for r in results}
+        st.session_state.jd_shortlist_threshold_input = float(shortlist_threshold)
+        st.session_state.jd_selections       = {
+            r["row_id"]: _is_strong_shortlist_candidate(
+                r, st.session_state.jd_shortlist_threshold_input
+            ) for r in results
+        }
 
         st.success(f"✅ Scored {len(results)} resume(s). Review the shortlist below.")
         st.rerun()
@@ -238,13 +273,47 @@ def _show_shortlist_review():
     results   = st.session_state.jd_match_results
     title     = st.session_state.jd_title_input
     deadline  = st.session_state.jd_deadline_input
+    shortlist_threshold = float(st.session_state.get("jd_shortlist_threshold_input", 7.0))
 
     st.markdown("---")
     st.markdown("### Step 3 — Review Shortlist")
     st.caption("Uncheck candidates you want to exclude before sending invites.")
+    st.caption("You can edit candidate name/email before invite send.")
+
+    top1, top2 = st.columns([2, 1])
+    with top1:
+        shortlist_threshold = st.number_input(
+            "Auto-select Threshold (/10)",
+            min_value=0.0,
+            max_value=10.0,
+            step=0.5,
+            value=shortlist_threshold,
+            key="jd_shortlist_threshold_review",
+            help="Candidates meeting this score and valid identity are selected by default",
+        )
+        st.session_state.jd_shortlist_threshold_input = float(shortlist_threshold)
+    with top2:
+        st.write("")
+        if st.button("Apply Auto-Select Rule", use_container_width=True):
+            for r in results:
+                _k = r.get("row_id", r["filename"])
+                st.session_state.jd_selections[_k] = _is_strong_shortlist_candidate(
+                    r, st.session_state.jd_shortlist_threshold_input
+                )
+            st.rerun()
+
+    auto_selected = sum(
+        1 for r in results
+        if _is_strong_shortlist_candidate(r, st.session_state.jd_shortlist_threshold_input)
+    )
+    if auto_selected < len(results):
+        st.info(
+            f"Auto-selected {auto_selected}/{len(results)} candidates "
+            f"(rule: score >= {st.session_state.jd_shortlist_threshold_input:.1f} with valid name and email)."
+        )
 
     # Column headers
-    hcols = st.columns([0.5, 2, 1.5, 1, 3, 1])
+    hcols = st.columns([0.5, 2.5, 1.3, 1, 3, 1])
     hcols[0].markdown("**Include**")
     hcols[1].markdown("**Candidate**")
     hcols[2].markdown("**File**")
@@ -255,8 +324,8 @@ def _show_shortlist_review():
     st.markdown("---")
 
     for r in results:
-        key  = r["filename"]
-        cols = st.columns([0.5, 2, 1.5, 1, 3, 1])
+        key  = r.get("row_id", r["filename"])
+        cols = st.columns([0.5, 2.5, 1.3, 1, 3, 1])
 
         # Checkbox
         checked = cols[0].checkbox(
@@ -269,7 +338,29 @@ def _show_shortlist_review():
         score = r["match_score"]
         emoji = "🟢" if score >= 7 else ("🟡" if score >= 5 else "🔴")
 
-        cols[1].markdown(f"**{r['name']}**  \n{r['email']}")
+        name_key = f"cand_name_{key}"
+        email_key = f"cand_email_{key}"
+
+        if name_key not in st.session_state:
+            st.session_state[name_key] = r.get("name", "")
+        if email_key not in st.session_state:
+            st.session_state[email_key] = r.get("email", "")
+
+        edited_name = cols[1].text_input(
+            f"Candidate Name {key}",
+            key=name_key,
+            label_visibility="collapsed",
+            placeholder="Candidate name",
+        ).strip()
+        edited_email = cols[1].text_input(
+            f"Candidate Email {key}",
+            key=email_key,
+            label_visibility="collapsed",
+            placeholder="candidate@email.com",
+        ).strip()
+
+        r["name"] = edited_name or "Unknown"
+        r["email"] = edited_email
         cols[2].caption(r["filename"])
         cols[3].markdown(f"{emoji} **{score}/10**")
         cols[4].caption(r["match_reason"])
@@ -281,7 +372,7 @@ def _show_shortlist_review():
     # Selected count
     selected = [
         r for r in results
-        if st.session_state.jd_selections.get(r["filename"], True)
+        if st.session_state.jd_selections.get(r.get("row_id", r["filename"]), True)
     ]
     st.markdown(f"**{len(selected)} candidate(s) selected for invite**")
 
@@ -296,6 +387,21 @@ def _show_shortlist_review():
     ):
         if len(selected) == 0:
             st.warning("No candidates selected.")
+            return
+
+        invalid_rows = []
+        for r in selected:
+            _name = (r.get("name") or "").strip()
+            _email = (r.get("email") or "").strip()
+            if (not _name) or (_name.lower() == "unknown") or (not _is_valid_email(_email)):
+                invalid_rows.append(
+                    f"{r.get('filename', 'resume')} -> name='{_name or 'missing'}', email='{_email or 'missing'}'"
+                )
+
+        if invalid_rows:
+            st.error("Please correct name/email before sending invites.")
+            for row in invalid_rows[:8]:
+                st.caption(f"• {row}")
             return
 
         _send_invites(selected, title, st.session_state.jd_text_input,
@@ -329,9 +435,10 @@ def _send_invites(selected, job_title, jd_text, min_pass_score, deadline_date):
         )
 
     progress = st.progress(0, text="Creating accounts and sending invites...")
-    success_count = 0
-    fail_count    = 0
-    results_log   = []
+    invite_sent_count = 0
+    account_only_count = 0
+    fail_count = 0
+    results_log = []
 
     for i, r in enumerate(selected):
         progress.progress(
@@ -360,13 +467,46 @@ def _send_invites(selected, job_title, jd_text, min_pass_score, deadline_date):
                 results_log.append({"name": r["name"], "status": "❌ Account creation failed"})
                 continue
 
-            username = account["username"]
-            password = account["password"]
+            username = account.get("username")
+            password = account.get("password")
+            if not username or not password:
+                fail_count += 1
+                results_log.append({
+                    "name": r["name"],
+                    "email": r["email"],
+                    "status": "❌ Account exists but credentials unavailable",
+                })
+                continue
+
+            # Safety gate: never email credentials unless they can authenticate now.
+            auth_check = verify_login(username, password)
+            if not auth_check or auth_check.get("role") != "student" or auth_check.get("username") != username:
+                fail_count += 1
+                results_log.append({
+                    "name": r["name"],
+                    "email": r.get("email"),
+                    "username": username,
+                    "password": password,
+                    "status": "❌ Credential verification failed (not sent)",
+                })
+                continue
+
+            email = (r.get("email") or "").strip()
+            if not email or "@" not in email or email.lower().startswith("unknown@"):
+                account_only_count += 1
+                results_log.append({
+                    "name": r["name"],
+                    "email": email,
+                    "username": username,
+                    "password": password,
+                    "status": "⚠️ Account created, invalid/missing email",
+                })
+                continue
 
             # Step 4: Send invite via n8n
-            email_sent = send_invite_via_n8n(
+            email_sent, email_error = send_invite_via_n8n(
                 name      = r["name"],
-                email     = r["email"],
+                email     = email,
                 username  = username,
                 password  = password,
                 job_title = job_title,
@@ -375,23 +515,23 @@ def _send_invites(selected, job_title, jd_text, min_pass_score, deadline_date):
 
             if email_sent:
                 mark_invite_sent(profile_id)
-                success_count += 1
+                invite_sent_count += 1
                 results_log.append({
                     "name":     r["name"],
-                    "email":    r["email"],
+                    "email":    email,
                     "username": username,
                     "password": password,
                     "status":   "✅ Invite sent",
                 })
             else:
                 # Email failed but account created — still log credentials
-                success_count += 1
+                account_only_count += 1
                 results_log.append({
                     "name":     r["name"],
-                    "email":    r["email"],
+                    "email":    email,
                     "username": username,
                     "password": password,
-                    "status":   "⚠️ Account created, email failed",
+                    "status":   f"⚠️ Account created, email failed ({email_error})",
                 })
 
         except Exception as e:
@@ -404,7 +544,9 @@ def _send_invites(selected, job_title, jd_text, min_pass_score, deadline_date):
     st.markdown("---")
     st.markdown("### ✅ Invite Results")
     st.markdown(
-        f"**{success_count} succeeded** · {fail_count} failed · "
+        f"**{invite_sent_count} invite(s) sent** · "
+        f"**{account_only_count} account(s) created (email not sent)** · "
+        f"**{fail_count} failed** · "
         f"Job Posting ID: `{jd_id}`"
     )
 
@@ -422,7 +564,8 @@ def _send_invites(selected, job_title, jd_text, min_pass_score, deadline_date):
     # Clear session state for fresh start
     if st.button("➕ Create Another Job Posting", use_container_width=True):
         for key in ["jd_match_results", "jd_title_input", "jd_text_input",
-                    "jd_min_score_input", "jd_deadline_input", "jd_selections"]:
+                    "jd_min_score_input", "jd_deadline_input", "jd_selections",
+                    "jd_shortlist_threshold_input", "jd_shortlist_threshold_review"]:
             st.session_state.pop(key, None)
         st.rerun()
 

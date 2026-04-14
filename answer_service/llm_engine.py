@@ -7,13 +7,23 @@ Calls Groq / LLaMA to score interview answers.
 import os
 import re
 import json
+from pathlib import Path
 from groq import Groq
 from dotenv import load_dotenv
 from answer_service.prompt import SYSTEM_PROMPT, build_prompt
 
-load_dotenv()
+_HERE = Path(__file__).resolve().parent
+_ENV_PATH = _HERE.parent / ".env"
+if _ENV_PATH.exists():
+    load_dotenv(dotenv_path=_ENV_PATH, override=False)
+else:
+    load_dotenv()
 
-_api_key = os.environ.get("GROQ_API_KEY", "")
+_api_key = (os.environ.get("GROQ_API_KEY") or "").strip()
+if not _api_key and _ENV_PATH.exists():
+    # Recover from inherited blank environment variables.
+    load_dotenv(dotenv_path=_ENV_PATH, override=True)
+    _api_key = (os.environ.get("GROQ_API_KEY") or "").strip()
 
 if not _api_key:
     raise EnvironmentError(

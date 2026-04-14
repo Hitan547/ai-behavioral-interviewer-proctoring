@@ -14,15 +14,43 @@ Tracks:
 import cv2
 import numpy as np
 import threading
+import os
 from collections import deque
 
-# OpenCV built-in detectors — no external dependencies
-_face_cascade = cv2.CascadeClassifier(
-    cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
-)
-_eye_cascade = cv2.CascadeClassifier(
-    cv2.data.haarcascades + 'haarcascade_eye.xml'
-)
+
+# ── Deployment-safe cascade loading ──────────────────────────────────────
+# On some Linux servers cv2.data.haarcascades is an empty string or the
+# XML files are missing even though opencv-python is installed.
+# We try three locations in order and raise a clear error if none work.
+
+def _load_cascade(filename: str) -> cv2.CascadeClassifier:
+    candidates = [
+        # 1. Standard opencv-python pip install (works locally + most servers)
+        os.path.join(cv2.data.haarcascades, filename),
+        # 2. System OpenCV installed via apt on Ubuntu/Debian
+        f"/usr/share/opencv4/haarcascades/{filename}",
+        f"/usr/share/opencv/haarcascades/{filename}",
+        # 3. Conda environment
+        os.path.join(os.path.dirname(cv2.__file__), "data", filename),
+    ]
+    for path in candidates:
+        if path and os.path.isfile(path):
+            clf = cv2.CascadeClassifier(path)
+            if not clf.empty():
+                return clf
+    # Last resort — let OpenCV try its default resolution
+    clf = cv2.CascadeClassifier(filename)
+    if clf.empty():
+        raise RuntimeError(
+            f"Could not load Haar cascade '{filename}'. "
+            f"Tried: {candidates}. "
+            f"Install opencv-python via pip (not apt) to fix this."
+        )
+    return clf
+
+
+_face_cascade = _load_cascade("haarcascade_frontalface_default.xml")
+_eye_cascade  = _load_cascade("haarcascade_eye.xml")
 
 _NEUTRAL_EMOTION = {"dominant": "neutral", "breakdown": {}}
 
@@ -116,10 +144,12 @@ class EngagementDetector:
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 60, 220), 2)
 
                 annotated = self._draw_hud(annotated, w, h, False, False)
-            
-                
+
             if self._frame_count % self._SAMPLE_INTERVAL == 0:
-                self._score_samples.append(self._compute_score())
+                s = self._compute_score()
+                # Only record samples when we have meaningful data (at least 30 frames)
+                if self._total_frames >= 30:
+                    self._score_samples.append(s)
 
         return annotated
 
@@ -143,7 +173,7 @@ class EngagementDetector:
         return self.get_absence_ratio() > self._ABSENCE_FLAG
 
     def get_emotion_summary(self) -> dict:
-        return _NEUTRAL_EMOTION
+        return dict(_NEUTRAL_EMOTION)
 
     def reset_session(self):
         with self._lock:
@@ -155,22 +185,45 @@ class EngagementDetector:
             self._consecutive_absent = 0
             self._score_samples      = []
             self._frame_count        = 0
+
     def set_countdown(self, value):
         """Set countdown number to display on camera feed."""
         with self._lock:
             self._countdown_value = value
 
     def snapshot_and_reset(self):
-        score   = self.get_avg_score()
-        absent  = self.get_absence_ratio()
-        emotion = self.get_emotion_summary()
-        self.reset_session()
+        with self._lock:
+            if self._score_samples:
+                # Trim extreme low outliers caused by brief camera occlusion
+                trimmed = sorted(self._score_samples)
+                cut = max(1, len(trimmed) // 5)   # drop bottom 20%
+                kept = trimmed[cut:] if cut < len(trimmed) else trimmed
+                score = round(float(np.mean(kept)), 2)
+            else:
+                score = self._compute_score()
+            # Never return 0 from a snapshot — minimum neutral score
+            score = max(score, 1.0)
+            absent = (round(self._absent_frames / self._total_frames, 3)
+                      if self._total_frames > 0 else 0.0)
+            emotion = dict(_NEUTRAL_EMOTION)
+
+            # Reset inline so nothing changes between reads
+            self._face_present.clear()
+            self._gaze_ok.clear()
+            self._face_positions.clear()
+            self._total_frames       = 0
+            self._absent_frames      = 0
+            self._consecutive_absent = 0
+            self._score_samples      = []
+            self._frame_count        = 0
+            self._countdown_value    = None
+
         return score, absent, emotion
 
     def _compute_score(self) -> float:
         n = len(self._face_present)
         if n == 0:
-            return 0.0
+            return 5.0
 
         face_presence  = sum(self._face_present) / n
         gaze_stability = sum(self._gaze_ok) / n
@@ -192,9 +245,17 @@ class EngagementDetector:
             + 0.3 * gaze_stability
             + 0.2 * stability
         )
-        return round(min(raw * 10, 10.0), 2)
+
+        score = min(raw * 10, 10.0)
+        if face_presence >= 0.70:
+            score = max(score, 4.0)
+        elif face_presence >= 0.50:
+            score = max(score, 2.5)
+
+        return round(score, 2)
 
     def _draw_hud(self, frame, w, h, gaze_ok, eyes_visible):
+        # Call _compute_score() directly — already inside lock from process_frame()
         score       = self._compute_score()
         absence_pct = (self._absent_frames / max(self._total_frames, 1)) * 100
 
@@ -219,15 +280,14 @@ class EngagementDetector:
         eye_color = (0, 220, 80) if eyes_visible else (0, 60, 220)
         cv2.putText(frame, f"Eyes: {'detected' if eyes_visible else 'not detected'}",
                     (18, h - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.40, eye_color, 1)
+
         # Countdown overlay
         if self._countdown_value is not None and self._countdown_value > 0:
-            # Dark semi-transparent pill background
             overlay = frame.copy()
             cv2.rectangle(overlay, (w//2 - 80, h//2 - 70),
                          (w//2 + 80, h//2 + 50), (20, 20, 20), -1)
             cv2.addWeighted(overlay, 0.65, frame, 0.35, 0, frame)
 
-            # "GET READY" label
             cv2.putText(
                 frame, "GET READY",
                 (w//2 - 60, h//2 - 30),
@@ -236,8 +296,7 @@ class EngagementDetector:
                 (200, 200, 200),
                 1
             )
-            # Large white countdown number
-            num_str = str(self._countdown_value)
+            num_str  = str(self._countdown_value)
             x_offset = w//2 - 22 if self._countdown_value >= 10 else w//2 - 14
             cv2.putText(
                 frame,

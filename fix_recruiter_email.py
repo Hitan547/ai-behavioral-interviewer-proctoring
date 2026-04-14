@@ -1,6 +1,6 @@
 import sqlite3
 
-conn = sqlite3.connect('data/psysense.db')
+conn = sqlite3.connect('psysense.db')
 cur  = conn.cursor()
 
 # Check current state

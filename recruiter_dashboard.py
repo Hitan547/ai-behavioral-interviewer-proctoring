@@ -387,8 +387,13 @@ def show_recruiter_dashboard():
             _me = _db.query(User).filter_by(
                 username=st.session_state.auth_username).first()
             _cur_email = _me.email or "" if _me else ""
+            _org_id = _me.org_id if _me else None
         finally:
             _db.close()
+
+        # Recover org context if session was started from a non-SaaS login path.
+        if _org_id and not st.session_state.get("org_id"):
+            st.session_state.org_id = _org_id
 
         new_email = st.text_input("Email", value=_cur_email,
                                   placeholder="you@email.com",
@@ -406,13 +411,35 @@ def show_recruiter_dashboard():
             finally:
                 _db2.close()
 
+        # Keep critical actions visible near the top so they don't disappear below the fold.
+        st.markdown("**⚙️ Account Actions**")
+        can_open_billing = bool(st.session_state.get("org_id"))
+        sidebar_action = st.selectbox(
+            "Account action",
+            ["No action", "Open Billing & Plan", "Log out"],
+            key="sidebar_account_action_select",
+            label_visibility="collapsed",
+        )
+        last_sidebar_action = st.session_state.get("_last_sidebar_action", "No action")
+        if sidebar_action != last_sidebar_action:
+            st.session_state["_last_sidebar_action"] = sidebar_action
+            if sidebar_action == "Open Billing & Plan":
+                if can_open_billing:
+                    st.session_state.show_billing_page = True
+                    st.rerun()
+                else:
+                    st.warning("Billing is unavailable because this account has no organization.")
+            elif sidebar_action == "Log out":
+                _recruiter_logout()
+
+        if not st.session_state.get("org_id"):
+            st.caption("Billing is available after recruiter signup creates an organization.")
+
         if st.session_state.get("org_id"):
             from saas.saas_auth import show_saas_billing_sidebar
             show_saas_billing_sidebar(st.session_state.org_id)
 
         st.markdown("---")
-        if st.button("🚪 Log out", use_container_width=True, key="sidebar_logout"):
-            _recruiter_logout()
 
     # ── TOP BAR (full width) ──
     st.markdown("""
@@ -422,19 +449,65 @@ def show_recruiter_dashboard():
     </div>
     """, unsafe_allow_html=True)
 
+    # One-click logout outside Account Actions (select-driven to avoid hidden buttons).
+    st.markdown("**Session**")
+    logout_action = st.selectbox(
+        "Session action",
+        ["Stay logged in", "Logout now"],
+        key="logout_direct_select",
+        label_visibility="collapsed",
+    )
+    last_logout_action = st.session_state.get("_last_logout_action", "Stay logged in")
+    if logout_action != last_logout_action:
+        st.session_state["_last_logout_action"] = logout_action
+        if logout_action == "Logout now":
+            _recruiter_logout()
+
+    # Duplicate critical actions in the main area to avoid sidebar visibility issues.
+    st.markdown("**Quick Actions**")
+    main_action = st.selectbox(
+        "Quick action",
+        ["No action", "Open Billing & Plan", "Log out"],
+        key="main_quick_action_select",
+        label_visibility="collapsed",
+    )
+    last_main_action = st.session_state.get("_last_main_action", "No action")
+    if main_action != last_main_action:
+        st.session_state["_last_main_action"] = main_action
+        if main_action == "Open Billing & Plan":
+            if bool(st.session_state.get("org_id")):
+                st.session_state.show_billing_page = True
+                st.rerun()
+            else:
+                st.warning("Billing is unavailable because this account has no organization.")
+        elif main_action == "Log out":
+            _recruiter_logout()
+
     _org = st.session_state.get("org_id")
     if st.session_state.get("show_billing_page") and not _org:
         st.session_state.show_billing_page = False
     if st.session_state.get("show_billing_page") and _org:
         b1, b2 = st.columns([1, 4])
         with b1:
-            if st.button("← Back to dashboard", key="billing_back"):
-                st.session_state.show_billing_page = False
-                st.rerun()
+            billing_nav = st.selectbox(
+                "Billing navigation",
+                ["Stay on billing", "Back to dashboard"],
+                key="billing_nav_select",
+                label_visibility="collapsed",
+            )
+            last_billing_nav = st.session_state.get("_last_billing_nav", "Stay on billing")
+            if billing_nav != last_billing_nav:
+                st.session_state["_last_billing_nav"] = billing_nav
+                if billing_nav == "Back to dashboard":
+                    st.session_state.show_billing_page = False
+                    st.rerun()
         with b2:
             st.caption("Manage your subscription and usage.")
-        from saas.saas_billing import show_billing_page
-        show_billing_page(_org)
+        try:
+            from saas.saas_billing import show_billing_page
+            show_billing_page(_org)
+        except Exception as e:
+            st.error(f"Billing is temporarily unavailable: {e}")
         return
 
     _idx = (
@@ -709,9 +782,47 @@ def _show_candidate_detail(session_id: int):
                     s.status or "Pending"),
                 key=f"status_{session_id}")
             if st.button("Update Status", key=f"upd_{session_id}",
-                         use_container_width=True):
+                        use_container_width=True):
                 update_candidate_status(session_id, new_status)
-                st.success(f"✅ Updated to {new_status}")
+
+                if new_status == "Shortlisted":
+                    import requests, os
+                    from database import SessionLocal, User
+
+                    _db = SessionLocal()
+                    try:
+                        _candidate_user = _db.query(User).filter_by(
+                            username=s.username).first()
+                        candidate_email = _candidate_user.email if _candidate_user else None
+                    finally:
+                        _db.close()
+
+                    webhook_url = os.getenv(
+                        "N8N_INVITE_WEBHOOK",
+                        "http://localhost:5678/webhook/candidate-invite"
+                    )
+
+                    payload = {
+                        "name":       s.candidate_name,
+                        "email":      candidate_email,
+                        "username":   s.username,
+                        "password":   "PsySense@2024",
+                        "job_title":  "AI Mock Interview",
+                        "login_url":  os.getenv("APP_BASE_URL", "http://localhost:8501"),
+                        "deadline":   "Within 48 hours",
+                        "session_id": session_id,
+                    }
+
+                    try:
+                        resp = requests.post(webhook_url, json=payload, timeout=8)
+                        print(f"[n8n] ✅ Invite sent — {resp.status_code}", flush=True)
+                        st.success(f"✅ Status updated + invite sent to {candidate_email or s.username}")
+                    except Exception as _e:
+                        print(f"[n8n] ⚠️ Invite webhook failed: {_e}", flush=True)
+                        st.warning(f"Status updated but email notification failed: {_e}")
+                else:
+                    st.success(f"✅ Updated to {new_status}")
+
                 st.rerun()
         with a2:
             notes = st.text_area(

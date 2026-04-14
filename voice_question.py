@@ -27,6 +27,11 @@ def speak_question(text: str):
         # Candidate reads the question from the card on screen
         return
 
+    # Default off on local Windows to avoid speaker-to-mic loopback that can
+    # pollute candidate transcripts. Enable only when explicitly needed.
+    if os.getenv("ENABLE_LOCAL_TTS", "0") != "1":
+        return
+
     def _speak():
         try:
             from gtts import gTTS

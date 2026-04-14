@@ -45,6 +45,9 @@ from voice_scorer   import compute_voice_score
 
 # ── Paths ──────────────────────────────────────────────────────────────────
 HF_MODEL = "Hitan2004/psysense-emotion-ai"
+HF_CACHE_DIR = os.path.join(PROJECT_ROOT, "hf_cache")
+os.makedirs(HF_CACHE_DIR, exist_ok=True)
+_LOCAL_ONLY = os.getenv("HF_LOCAL_ONLY", "0") == "1"
 
 _ENCODER_PATHS = [
     os.path.join(PROJECT_ROOT, "emotion_service", "model", "label_encoder.pkl"),
@@ -52,23 +55,45 @@ _ENCODER_PATHS = [
     os.path.join(PROJECT_ROOT, "psysense-emotion-ai", "model", "label_encoder.pkl"),
 ]
 
-def _find_encoder():
-    for p in _ENCODER_PATHS:
-        if os.path.exists(p):
-            return p
-    raise FileNotFoundError(f"label_encoder.pkl not found. Tried: {_ENCODER_PATHS}")
-
 # ── Load DistilBERT model once at startup ──────────────────────────────────
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+_model = None
+_tokenizer = None
+_MODEL_AVAILABLE = False
 
 print("Loading emotion model (Hitan2004/psysense-emotion-ai)...")
-_model     = DistilBertForSequenceClassification.from_pretrained(HF_MODEL)
-_tokenizer = DistilBertTokenizerFast.from_pretrained(HF_MODEL)
-_model.to(device)
-_model.eval()
+try:
+    _model = DistilBertForSequenceClassification.from_pretrained(
+        HF_MODEL,
+        cache_dir=HF_CACHE_DIR,
+        local_files_only=_LOCAL_ONLY,
+    )
+    _tokenizer = DistilBertTokenizerFast.from_pretrained(
+        HF_MODEL,
+        cache_dir=HF_CACHE_DIR,
+        local_files_only=_LOCAL_ONLY,
+    )
+    _model.to(device)
+    _model.eval()
+    _MODEL_AVAILABLE = True
+    print(f"Emotion model loaded on {device}")
+except Exception as e:
+    _MODEL_AVAILABLE = False
+    print(f"Emotion model unavailable: {e}")
+    print("Continuing with neutral fallback for model-derived signal.")
 
-with open(_find_encoder(), "rb") as f:
-    _mlb = pickle.load(f)
+# Best-effort label-encoder load for deployment diagnostics.
+for _enc_path in _ENCODER_PATHS:
+    if os.path.exists(_enc_path):
+        try:
+            with open(_enc_path, "rb") as f:
+                pickle.load(f)
+            print(f"Label encoder found: {_enc_path}")
+        except Exception as e:
+            print(f"Label encoder load warning ({_enc_path}): {e}")
+        break
+else:
+    print(f"Label encoder not found. Tried: {_ENCODER_PATHS}")
 
 # Hardcoded GoEmotions 28 labels — bypasses pkl numpy version conflict
 _label_names = [
@@ -79,7 +104,7 @@ _label_names = [
     "optimism", "pride", "realization", "relief", "remorse",
     "sadness", "surprise", "neutral"
 ]
-print(f"✅ Emotion model loaded — {len(_label_names)} labels")
+print(f"Emotion model loaded - {len(_label_names)} labels")
 
 # ── Chunking — must match training max_length=128 ─────────────────────────
 _CHUNK_TOKENS = 110
@@ -99,6 +124,9 @@ _STRESS_EMOTIONS = {
 
 # ── DistilBERT prediction ──────────────────────────────────────────────────
 def _predict_probs(text: str) -> np.ndarray:
+    if not _MODEL_AVAILABLE or _model is None or _tokenizer is None:
+        raise RuntimeError("Emotion model is not available")
+
     inputs = _tokenizer(
         text,
         return_tensors="pt",
@@ -112,6 +140,9 @@ def _predict_probs(text: str) -> np.ndarray:
 
 
 def _predict_chunked(text: str) -> np.ndarray:
+    if not _MODEL_AVAILABLE or _tokenizer is None:
+        raise RuntimeError("Emotion model is not available")
+
     token_ids = _tokenizer.encode(text, add_special_tokens=False)
     if len(token_ids) <= _CHUNK_TOKENS:
         return _predict_probs(text)
