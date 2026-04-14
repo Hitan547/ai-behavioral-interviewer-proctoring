@@ -786,40 +786,107 @@ def _show_candidate_detail(session_id: int):
                 update_candidate_status(session_id, new_status)
 
                 if new_status == "Shortlisted":
-                    import requests, os
-                    from database import SessionLocal, User
+                    import bcrypt
+                    import secrets
+                    import string
+                    from database import (
+                        SessionLocal,
+                        User,
+                        create_candidate_account,
+                        get_profile_by_username,
+                        verify_login,
+                    )
+                    from recruiter_jd_page import send_invite_via_n8n
 
                     _db = SessionLocal()
                     try:
                         _candidate_user = _db.query(User).filter_by(
                             username=s.username).first()
-                        candidate_email = _candidate_user.email if _candidate_user else None
+                        if not _candidate_user:
+                            st.warning("Status updated but email notification failed: student account not found.")
+                            print(f"[n8n] ⚠️ Invite skipped: student account missing for {s.username}", flush=True)
+                        else:
+                            candidate_email = (_candidate_user.email or "").strip()
+                            if not candidate_email or "@" not in candidate_email:
+                                st.warning(
+                                    "Status updated but email notification failed: "
+                                    "candidate email is missing or invalid."
+                                )
+                                print(
+                                    f"[n8n] ⚠️ Invite skipped: invalid email for {s.username} -> {candidate_email}",
+                                    flush=True,
+                                )
+                            else:
+                                invite_username = _candidate_user.username
+                                invite_password = None
+                                can_send_invite = True
+
+                                # Prefer existing invite credentials when a candidate profile exists.
+                                profile = get_profile_by_username(s.username)
+                                if profile:
+                                    account = create_candidate_account(profile.id)
+                                    if "error" in account:
+                                        can_send_invite = False
+                                        st.warning(
+                                            "Status updated but email notification failed: "
+                                            f"{account['error']}"
+                                        )
+                                        print(
+                                            f"[n8n] ⚠️ Invite skipped for {candidate_email}: {account['error']}",
+                                            flush=True,
+                                        )
+                                    else:
+                                        invite_username = account.get("username") or invite_username
+                                        invite_password = account.get("password")
+
+                                # Session-only candidates have no reversible password; rotate to a fresh one.
+                                if can_send_invite and not invite_password:
+                                    alphabet = string.ascii_letters + string.digits
+                                    invite_password = "".join(secrets.choice(alphabet) for _ in range(10))
+                                    _candidate_user.password_hash = bcrypt.hashpw(
+                                        invite_password.encode(),
+                                        bcrypt.gensalt(),
+                                    ).decode()
+                                    _db.commit()
+
+                                if can_send_invite:
+                                    auth_check = verify_login(invite_username, invite_password)
+                                    if (
+                                        not auth_check
+                                        or auth_check.get("role") != "student"
+                                        or auth_check.get("username") != invite_username
+                                    ):
+                                        can_send_invite = False
+                                        st.warning(
+                                            "Status updated but email notification failed: "
+                                            "generated credentials could not be verified."
+                                        )
+                                        print(
+                                            f"[n8n] ⚠️ Invite skipped for {candidate_email}: credential verification failed",
+                                            flush=True,
+                                        )
+
+                                if can_send_invite:
+                                    email_sent, email_error = send_invite_via_n8n(
+                                        name=s.candidate_name,
+                                        email=candidate_email,
+                                        username=invite_username,
+                                        password=invite_password,
+                                        job_title="AI Mock Interview",
+                                        deadline="Within 48 hours",
+                                    )
+
+                                    if email_sent:
+                                        print(f"[n8n] ✅ Invite sent for {invite_username}", flush=True)
+                                        st.success(f"✅ Status updated + invite sent to {candidate_email}")
+                                    else:
+                                        print(
+                                            f"[n8n] ⚠️ Invite webhook failed for {candidate_email}: {email_error}",
+                                            flush=True,
+                                        )
+                                        st.warning(f"Status updated but email notification failed: {email_error}")
                     finally:
                         _db.close()
-
-                    webhook_url = os.getenv(
-                        "N8N_INVITE_WEBHOOK",
-                        "http://localhost:5678/webhook/candidate-invite"
-                    )
-
-                    payload = {
-                        "name":       s.candidate_name,
-                        "email":      candidate_email,
-                        "username":   s.username,
-                        "password":   "PsySense@2024",
-                        "job_title":  "AI Mock Interview",
-                        "login_url":  os.getenv("APP_BASE_URL", "http://localhost:8501"),
-                        "deadline":   "Within 48 hours",
-                        "session_id": session_id,
-                    }
-
-                    try:
-                        resp = requests.post(webhook_url, json=payload, timeout=8)
-                        print(f"[n8n] ✅ Invite sent — {resp.status_code}", flush=True)
-                        st.success(f"✅ Status updated + invite sent to {candidate_email or s.username}")
-                    except Exception as _e:
-                        print(f"[n8n] ⚠️ Invite webhook failed: {_e}", flush=True)
-                        st.warning(f"Status updated but email notification failed: {_e}")
                 else:
                     st.success(f"✅ Updated to {new_status}")
 
