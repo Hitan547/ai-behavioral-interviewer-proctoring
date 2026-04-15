@@ -27,6 +27,7 @@ from config import (
 )
 from audio_capture_robust import (
     save_audio_frames_to_wav,
+    save_audio_input_to_wav,
     transcribe_wav,
     get_webrtc_config_for_saas,
 )
@@ -38,6 +39,9 @@ from engagement_realtime import EngagementDetector
 import av
 
 groq_key = os.getenv("GROQ_API_KEY_2") or os.getenv("GROQ_API_KEY")
+USE_AUDIO_INPUT_CAPTURE = os.getenv("PSYSENSE_USE_AUDIO_INPUT_CAPTURE", "0").strip().lower() in {
+    "1", "true", "yes", "on"
+}
 
 init_db()
 
@@ -624,6 +628,8 @@ _D = {
     "audio_capture_started": False,
     "audio_capture_processor_id": None,
     "answer_input": "",
+    "audio_input_bytes": b"",
+    "audio_input_name": "",
     "cognitive_scores": [], "emotion_scores": [], "engagement_scores": [],
     "jd_id": None,
     "audio_frames": [],   # collects browser audio frames during recording 
@@ -765,6 +771,10 @@ if "media_stream_constraints" not in webrtc_config:
         },
     }
 
+if USE_AUDIO_INPUT_CAPTURE:
+    # Keep webcam for engagement tracking, but capture mic with st.audio_input.
+    webrtc_config["media_stream_constraints"]["audio"] = False
+
 webrtc_key = f"engagement-{st.session_state.webrtc_reset_nonce}"
 main_col, cam_col = st.columns([2.5, 1], gap="large")
 
@@ -811,16 +821,18 @@ with cam_col:
          border-right:1px solid var(--cam-border);">
     """, unsafe_allow_html=True)
 
-    ctx = webrtc_streamer(
-        key=webrtc_key,
-        mode=WebRtcMode.SENDRECV,
-        video_processor_factory=EngagementProcessor,
-        audio_processor_factory=AudioCaptureProcessor,
-        video_receiver_size=32,
-        async_processing=True,
-        sendback_audio=True,
-        **webrtc_config,
-    )
+    webrtc_kwargs = {
+        "key": webrtc_key,
+        "mode": WebRtcMode.SENDRECV,
+        "video_processor_factory": EngagementProcessor,
+        "video_receiver_size": 32,
+        "async_processing": True,
+        "sendback_audio": not USE_AUDIO_INPUT_CAPTURE,
+    }
+    if not USE_AUDIO_INPUT_CAPTURE:
+        webrtc_kwargs["audio_processor_factory"] = AudioCaptureProcessor
+
+    ctx = webrtc_streamer(**webrtc_kwargs, **webrtc_config)
 
     st.markdown("""
     <script>
@@ -884,7 +896,7 @@ with cam_col:
     video_ready = bool(ctx.video_processor is not None)
     audio_processor_ready = bool(ctx.audio_processor is not None)
     audio_track_ready = bool(getattr(ctx, "input_audio_track", None) is not None)
-    audio_ready = bool(audio_processor_ready and audio_track_ready)
+    audio_ready = True if USE_AUDIO_INPUT_CAPTURE else bool(audio_processor_ready and audio_track_ready)
     stream_ok = bool(playing and video_ready)
     stream_waiting = bool(playing and (not video_ready))
 
@@ -900,10 +912,16 @@ with cam_col:
       </div>
     </div>
     """, unsafe_allow_html=True)
-    st.caption(
-        f"WebRTC: playing={ctx.state.playing}, signalling={ctx.state.signalling}, "
-        f"audio_proc={audio_processor_ready}, input_audio={audio_track_ready}, audio_ready={audio_ready}"
-    )
+    if USE_AUDIO_INPUT_CAPTURE:
+        st.caption(
+            f"WebRTC: playing={ctx.state.playing}, signalling={ctx.state.signalling}, "
+            "mic capture mode=st.audio_input"
+        )
+    else:
+        st.caption(
+            f"WebRTC: playing={ctx.state.playing}, signalling={ctx.state.signalling}, "
+            f"audio_proc={audio_processor_ready}, input_audio={audio_track_ready}, audio_ready={audio_ready}"
+        )
 
     if _hide_cam_ui:
         st.markdown("</div>", unsafe_allow_html=True)
@@ -1177,16 +1195,24 @@ else:
             render_stepper(1)
             page_title("Camera Check", "Allow camera access — make sure you're well lit and centred.")
             st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
-            st.info(
-                "Click START in the camera panel and allow microphone access. "
-                "Your default system microphone is auto-detected."
-            )
+            if USE_AUDIO_INPUT_CAPTURE:
+                st.info(
+                    "Click START in the camera panel to enable video. "
+                    "You will record each answer with the in-page microphone recorder."
+                )
+            else:
+                st.info(
+                    "Click START in the camera panel and allow microphone access. "
+                    "Your default system microphone is auto-detected."
+                )
 
             if stream_ok:
                 c1, c2, c3 = st.columns(3)
                 c1.success("✓ Camera on")
                 c2.success("✓ Face detected")
-                if audio_ready:
+                if USE_AUDIO_INPUT_CAPTURE:
+                    c3.success("✓ In-page mic recorder enabled")
+                elif audio_ready:
                     c3.success("✓ Mic stream ready")
                 else:
                     c3.warning("⚠ Mic not ready")
@@ -1200,7 +1226,7 @@ else:
                 if not st.session_state.get("camera_ready_confirmed"):
                     st.session_state.camera_ready_confirmed = True
 
-                if not audio_ready:
+                if (not USE_AUDIO_INPUT_CAPTURE) and (not audio_ready):
                     st.warning("Microphone stream is not ready yet. Click STOP, then START again and allow microphone access before starting the interview.")
                 elif st.button("▶  Start Interview", type="primary", use_container_width=True, key="cam_proceed"):
                     if st.session_state.get("jd_id"):
@@ -1312,12 +1338,14 @@ else:
                 st.session_state.record_container = {
                     "text": "", "done": False, "wav_path": None, "duration": 60, "error": None}
                 st.session_state.audio_frames = []
+                st.session_state.audio_input_bytes = b""
+                st.session_state.audio_input_name = ""
                 st.session_state.audio_capture_debug = ""
                 st.session_state.audio_capture_started = False
                 st.session_state.audio_capture_processor_id = None
 
                 # Prime audio capture before entering recording to reduce first-tick races.
-                if stream_ok and ctx.audio_processor:
+                if (not USE_AUDIO_INPUT_CAPTURE) and stream_ok and ctx.audio_processor:
                     try:
                         ctx.audio_processor.drain()
                         # Let local TTS/speaker bleed settle before arming capture.
@@ -1351,6 +1379,7 @@ else:
             print(f"  ctx.audio_processor={ctx.audio_processor}")
             print(f"  audio_processor_id={id(ctx.audio_processor) if ctx.audio_processor else None}")
             print(f"  audio_capture_started={st.session_state.get('audio_capture_started', 'NOT SET')}")
+            print(f"  use_audio_input_capture={USE_AUDIO_INPUT_CAPTURE}")
             print(f"[RECORDING PHASE] playing={ctx.state.playing}, signalling={ctx.state.signalling}")
 
             if st.session_state.get("record_start") is None:
@@ -1376,6 +1405,8 @@ else:
 
             # Start/restart capture when not armed (for first render and processor swaps).
             if (
+                not USE_AUDIO_INPUT_CAPTURE
+                and
                 stream_ok
                 and ctx.audio_processor
                 and not st.session_state.get("audio_capture_started", False)
@@ -1419,7 +1450,7 @@ else:
             if stream_ok and ctx.video_processor:
                 ctx.video_processor.set_countdown(None)
 
-            if stream_ok and not ctx.audio_processor:
+            if (not USE_AUDIO_INPUT_CAPTURE) and stream_ok and (not ctx.audio_processor):
                 st.error(
                     "🎤 Microphone stream not ready\n\n"
                     "Click STOP in the camera panel, then START again. "
@@ -1431,7 +1462,7 @@ else:
                 )
 
             # Continuously drain buffered frames while recording timer is active.
-            if stream_ok and ctx.audio_processor and st.session_state.get("audio_capture_started") and remaining > 0:
+            if (not USE_AUDIO_INPUT_CAPTURE) and stream_ok and ctx.audio_processor and st.session_state.get("audio_capture_started") and remaining > 0:
                 try:
                     tick_frames = ctx.audio_processor.pop_frames()
                     if tick_frames:
@@ -1466,6 +1497,39 @@ else:
                         <strong>A</strong>ction · <strong>R</strong>esult
                       </div>
                     </div>""", unsafe_allow_html=True)
+
+                    if USE_AUDIO_INPUT_CAPTURE:
+                        audio_input_key = (
+                            f"audio_input_q{st.session_state.q_index}_"
+                            f"retry{int(st.session_state.retry_used)}"
+                        )
+                        clip = st.audio_input(
+                            "Record your answer and click stop when finished",
+                            key=audio_input_key,
+                        )
+                        if clip is not None:
+                            try:
+                                clip_bytes = clip.getvalue()
+                            except Exception:
+                                clip_bytes = b""
+                            if clip_bytes:
+                                st.session_state.audio_input_bytes = clip_bytes
+                                st.session_state.audio_input_name = (
+                                    getattr(clip, "name", "") or "audio_input"
+                                )
+                                st.session_state.audio_capture_debug = (
+                                    f"Recorded clip size: {len(clip_bytes)} bytes."
+                                )
+
+                        if st.session_state.get("audio_input_bytes"):
+                            if st.button(
+                                "Finish Recording Now",
+                                key=f"finish_audio_now_{audio_input_key}",
+                                use_container_width=True,
+                            ):
+                                st.session_state.record_start = time.time() - RECORD_TIME
+                                st.rerun()
+
                 st.progress((RECORD_TIME - remaining) / RECORD_TIME)
                 if st.session_state.get("audio_capture_debug"):
                     st.caption(st.session_state.audio_capture_debug)
@@ -1484,7 +1548,7 @@ else:
                 st.session_state.cur_facial_emotion = fem
 
                 frames = list(st.session_state.get("audio_frames", []))
-                if stream_ok and ctx.audio_processor:
+                if (not USE_AUDIO_INPUT_CAPTURE) and stream_ok and ctx.audio_processor:
                     try:
                         tail_frames = ctx.audio_processor.stop_and_get()
                         if tail_frames:
@@ -1497,63 +1561,109 @@ else:
                 st.session_state.audio_capture_processor_id = None
 
                 # Save browser audio frames to WAV, then transcribe
-                frames = st.session_state.get("audio_frames", [])
-                print(f"[RECORDING→PROCESSING] Collected {len(frames)} audio frames")
-                
-                if frames:
-                    st.session_state.audio_capture_debug = (
-                        f"Captured {len(frames)} audio chunks for transcription."
-                    )
-                    st.session_state.record_container["error"] = None
-                    detected_sr = (
-                        int(getattr(ctx.audio_processor, "sample_rate", 48000))
-                        if ctx.audio_processor else 48000
-                    )
-                    wav_path = save_audio_frames_to_wav(frames, sample_rate=detected_sr)
-                    
-                    if wav_path:
-                        print(f"[RECORDING→PROCESSING] WAV file created: {wav_path}")
-                        transcribe_wav(
-                            wav_path,
-                            st.session_state.record_container,
-                            RECORD_TIME,
-                            prompt=(
-                                "Verbatim transcription of spoken interview answer in English. "
-                                "Do not paraphrase, summarize, or infer from context. "
-                                "Preserve exact words, fillers, repetitions, and false starts. "
-                                "If any word is unclear, output [inaudible]."
-                            ),
-                        )
+                if USE_AUDIO_INPUT_CAPTURE:
+                    clip_bytes = st.session_state.get("audio_input_bytes", b"")
+                    clip_name = st.session_state.get("audio_input_name", "audio_input")
+                    print(f"[RECORDING→PROCESSING] audio_input bytes={len(clip_bytes)}")
+
+                    if clip_bytes:
+                        st.session_state.record_container["error"] = None
+                        wav_path = save_audio_input_to_wav(clip_bytes, source_hint=clip_name)
+
+                        if wav_path:
+                            print(f"[RECORDING→PROCESSING] WAV file created: {wav_path}")
+                            transcribe_wav(
+                                wav_path,
+                                st.session_state.record_container,
+                                RECORD_TIME,
+                                prompt=(
+                                    "Verbatim transcription of spoken interview answer in English. "
+                                    "Do not paraphrase, summarize, or infer from context. "
+                                    "Preserve exact words, fillers, repetitions, and false starts. "
+                                    "If any word is unclear, output [inaudible]."
+                                ),
+                            )
+                        else:
+                            print("[RECORDING→PROCESSING] WAV creation failed from audio_input")
+                            st.session_state.record_container.update({
+                                "text": "",
+                                "wav_path": None,
+                                "duration": RECORD_TIME,
+                                "done": True,
+                                "error": "Failed to decode recorded audio. Please record again."
+                            })
                     else:
-                        print("[RECORDING→PROCESSING] WAV creation failed")
+                        print("[RECORDING→PROCESSING] No audio_input bytes captured")
+                        st.session_state.audio_capture_debug = (
+                            "No recorded clip found. Use the in-page microphone recorder and try again."
+                        )
                         st.session_state.record_container.update({
                             "text": "",
                             "wav_path": None,
                             "duration": RECORD_TIME,
                             "done": True,
-                            "error": "Failed to process audio. Please check microphone and try again."
+                            "error": "No recorded audio found. Please record your answer and try again."
                         })
                 else:
-                    # No captured browser audio: finish immediately so UI does not
-                    # stall in processing for another full recording window.
-                    print("[RECORDING→PROCESSING] No audio frames captured!")
-                    st.session_state.audio_capture_debug = (
-                        "No audio was captured from your microphone.\n\n"
-                        "Possible causes:\n"
-                        "• Microphone permission not granted\n"
-                        "• Wrong microphone selected\n"
-                        "• Microphone muted in Windows\n\n"
-                        "Please return to Camera Check and ensure microphone access is allowed."
-                    )
-                    st.session_state.record_container.update({
-                        "text": "",
-                        "wav_path": None,
-                        "duration": RECORD_TIME,
-                        "done": True,
-                        "error": "No audio captured. Please check microphone permissions and try again."
-                    })
+                    frames = st.session_state.get("audio_frames", [])
+                    print(f"[RECORDING→PROCESSING] Collected {len(frames)} audio frames")
+
+                    if frames:
+                        st.session_state.audio_capture_debug = (
+                            f"Captured {len(frames)} audio chunks for transcription."
+                        )
+                        st.session_state.record_container["error"] = None
+                        detected_sr = (
+                            int(getattr(ctx.audio_processor, "sample_rate", 48000))
+                            if ctx.audio_processor else 48000
+                        )
+                        wav_path = save_audio_frames_to_wav(frames, sample_rate=detected_sr)
+
+                        if wav_path:
+                            print(f"[RECORDING→PROCESSING] WAV file created: {wav_path}")
+                            transcribe_wav(
+                                wav_path,
+                                st.session_state.record_container,
+                                RECORD_TIME,
+                                prompt=(
+                                    "Verbatim transcription of spoken interview answer in English. "
+                                    "Do not paraphrase, summarize, or infer from context. "
+                                    "Preserve exact words, fillers, repetitions, and false starts. "
+                                    "If any word is unclear, output [inaudible]."
+                                ),
+                            )
+                        else:
+                            print("[RECORDING→PROCESSING] WAV creation failed")
+                            st.session_state.record_container.update({
+                                "text": "",
+                                "wav_path": None,
+                                "duration": RECORD_TIME,
+                                "done": True,
+                                "error": "Failed to process audio. Please check microphone and try again."
+                            })
+                    else:
+                        # No captured browser audio: finish immediately so UI does not
+                        # stall in processing for another full recording window.
+                        print("[RECORDING→PROCESSING] No audio frames captured!")
+                        st.session_state.audio_capture_debug = (
+                            "No audio was captured from your microphone.\n\n"
+                            "Possible causes:\n"
+                            "• Microphone permission not granted\n"
+                            "• Wrong microphone selected\n"
+                            "• Microphone muted in Windows\n\n"
+                            "Please return to Camera Check and ensure microphone access is allowed."
+                        )
+                        st.session_state.record_container.update({
+                            "text": "",
+                            "wav_path": None,
+                            "duration": RECORD_TIME,
+                            "done": True,
+                            "error": "No audio captured. Please check microphone permissions and try again."
+                        })
 
                 st.session_state.audio_frames = []  # clear for next question
+                st.session_state.audio_input_bytes = b""
+                st.session_state.audio_input_name = ""
                 go_to("processing")
 
         # ── PROCESSING ────────────────────────────────────────────────
@@ -1651,6 +1761,8 @@ else:
                         st.session_state.record_container = {
                             "text": "", "done": False, "wav_path": None, "duration": 60, "error": None}
                         st.session_state.audio_frames     = []  # clear old frames
+                        st.session_state.audio_input_bytes = b""
+                        st.session_state.audio_input_name = ""
                         st.session_state.record_start     = time.time()
                         if stream_ok and ctx.video_processor:
                             ctx.video_processor.snapshot_and_reset()
@@ -1714,6 +1826,8 @@ else:
                     st.session_state.audio_capture_started = False
                     st.session_state.audio_capture_processor_id = None
                     st.session_state.audio_frames = []
+                    st.session_state.audio_input_bytes = b""
+                    st.session_state.audio_input_name = ""
 
                     if st.session_state.q_index >= len(QUESTIONS):
                         go_to("report")

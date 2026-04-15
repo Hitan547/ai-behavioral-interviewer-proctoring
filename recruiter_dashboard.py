@@ -65,6 +65,28 @@ def _verdict_color(v):
     }.get(v, C["muted"])
 
 
+def _safe_json_loads(raw_value, fallback):
+    """Defensive JSON decode for historical/partial records."""
+    if not raw_value:
+        return fallback
+    try:
+        parsed = json.loads(raw_value)
+        return fallback if parsed is None else parsed
+    except Exception:
+        return fallback
+
+
+_STATUS_OPTIONS = ["Pending", "Shortlisted", "Rejected"]
+
+
+def _status_index(value):
+    """Return a stable index for status select controls."""
+    try:
+        return _STATUS_OPTIONS.index((value or "Pending"))
+    except Exception:
+        return 0
+
+
 # ─────────────────────────────────────────────
 # PDF
 # ─────────────────────────────────────────────
@@ -73,9 +95,9 @@ def generate_candidate_pdf(session_id: int) -> bytes:
     if not s:
         return b""
 
-    insight  = json.loads(s.insight_json)           if s.insight_json           else {}
-    per_q    = json.loads(s.per_question_json)       if s.per_question_json       else []
-    verdicts = json.loads(s.recruiter_verdicts_json) if s.recruiter_verdicts_json else []
+    insight  = _safe_json_loads(s.insight_json, {})
+    per_q    = _safe_json_loads(s.per_question_json, [])
+    verdicts = _safe_json_loads(s.recruiter_verdicts_json, [])
 
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4,
@@ -609,7 +631,7 @@ def _show_overview():
         verdict = _verdict_from_score(s.cognitive_score or 5.0)
         bc      = BADGE_CLASS.get(verdict, "vb-yellow")
         si      = STATUS_ICON.get(s.status, "")
-        insight_data = json.loads(s.insight_json) if s.insight_json else {}
+        insight_data = _safe_json_loads(s.insight_json, {})
 
         with st.container(border=True):
             c1, c2, c3, c4, c5, c6, c7 = st.columns([2.5, 0.8, 0.7, 0.7, 0.7, 1.2, 1.0])
@@ -706,9 +728,9 @@ def _show_candidate_detail(session_id: int):
         st.error("❌ Candidate not found.")
         return
 
-    insight  = json.loads(s.insight_json)           if s.insight_json           else {}
-    per_q    = json.loads(s.per_question_json)       if s.per_question_json       else []
-    verdicts = json.loads(s.recruiter_verdicts_json) if s.recruiter_verdicts_json else []
+    insight  = _safe_json_loads(s.insight_json, {})
+    per_q    = _safe_json_loads(s.per_question_json, [])
+    verdicts = _safe_json_loads(s.recruiter_verdicts_json, [])
 
     sc      = s.final_score or 0
     verdict = _verdict_from_score(s.cognitive_score or 5.0)
@@ -777,9 +799,8 @@ def _show_candidate_detail(session_id: int):
         a1, a2 = st.columns([1, 2])
         with a1:
             new_status = st.selectbox(
-                "Status", ["Pending", "Shortlisted", "Rejected"],
-                index=["Pending", "Shortlisted", "Rejected"].index(
-                    s.status or "Pending"),
+                "Status", _STATUS_OPTIONS,
+                index=_status_index(s.status),
                 key=f"status_{session_id}")
             if st.button("Update Status", key=f"upd_{session_id}",
                         use_container_width=True):
@@ -794,9 +815,18 @@ def _show_candidate_detail(session_id: int):
                         User,
                         create_candidate_account,
                         get_profile_by_username,
+                        mark_invite_sent,
                         verify_login,
                     )
-                    from recruiter_jd_page import send_invite_via_n8n
+                    try:
+                        from recruiter_jd_page import send_invite_via_n8n
+                    except Exception as invite_import_err:
+                        send_invite_via_n8n = None
+                        print(
+                            "[n8n] ⚠️ Invite sender unavailable during import: "
+                            f"{invite_import_err}",
+                            flush=True,
+                        )
 
                     _db = SessionLocal()
                     try:
@@ -820,10 +850,12 @@ def _show_candidate_detail(session_id: int):
                                 invite_username = _candidate_user.username
                                 invite_password = None
                                 can_send_invite = True
+                                profile_id = None
 
                                 # Prefer existing invite credentials when a candidate profile exists.
                                 profile = get_profile_by_username(s.username)
                                 if profile:
+                                    profile_id = profile.id
                                     account = create_candidate_account(profile.id)
                                     if "error" in account:
                                         can_send_invite = False
@@ -866,6 +898,13 @@ def _show_candidate_detail(session_id: int):
                                             flush=True,
                                         )
 
+                                if can_send_invite and send_invite_via_n8n is None:
+                                    can_send_invite = False
+                                    st.warning(
+                                        "Status updated but email notification failed: "
+                                        "invite sender is unavailable in this runtime."
+                                    )
+
                                 if can_send_invite:
                                     email_sent, email_error = send_invite_via_n8n(
                                         name=s.candidate_name,
@@ -877,6 +916,11 @@ def _show_candidate_detail(session_id: int):
                                     )
 
                                     if email_sent:
+                                        if profile_id:
+                                            try:
+                                                mark_invite_sent(profile_id)
+                                            except Exception as mark_err:
+                                                print(f"[n8n] ⚠️ Invite sent but mark_invite_sent failed: {mark_err}", flush=True)
                                         print(f"[n8n] ✅ Invite sent for {invite_username}", flush=True)
                                         st.success(f"✅ Status updated + invite sent to {candidate_email}")
                                     else:

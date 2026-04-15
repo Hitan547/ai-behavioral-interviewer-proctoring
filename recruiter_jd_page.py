@@ -15,6 +15,7 @@ import os
 import json
 import time
 import re
+from pathlib import Path
 import requests
 import streamlit as st
 from datetime import datetime, date
@@ -42,6 +43,7 @@ load_dotenv()
 # n8n webhook URL for candidate invite emails
 # Set this in your .env as N8N_INVITE_WEBHOOK
 N8N_INVITE_WEBHOOK = os.getenv("N8N_INVITE_WEBHOOK", "http://localhost:5678/webhook/candidate-invite")
+N8N_INVITE_WORKFLOW_NAME = os.getenv("N8N_INVITE_WORKFLOW_NAME", "My workflow 2")
 
 # Your app's login URL — change to your Cloudflare tunnel URL in production
 APP_URL = os.getenv("APP_BASE_URL", "http://localhost:8501")
@@ -61,6 +63,82 @@ EMAIL_REGEX = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
 
 def _is_valid_email(email: str) -> bool:
     return bool(EMAIL_REGEX.match((email or "").strip()))
+
+
+def _n8n_log_file() -> Path:
+    return Path.home() / ".n8n" / "n8nEventLog.log"
+
+
+def _normalize_n8n_error(message: str) -> str:
+    msg = (message or "").strip()
+    low = msg.casefold()
+    if "authorization grant" in low or "refresh token" in low or "revoked" in low:
+        return "n8n Gmail credential is invalid/expired. Reconnect Gmail in n8n and try again."
+    if "cannot read properties of undefined" in low and "split" in low:
+        return "n8n workflow received missing email data. Verify Gmail 'To' mapping from webhook payload."
+    return msg or "n8n workflow failed"
+
+
+def _detect_recent_n8n_failure(started_at_epoch: float) -> str | None:
+    """Best-effort detection for webhook-accepted but downstream-failed n8n runs."""
+    log_path = _n8n_log_file()
+    if not log_path.exists():
+        return None
+
+    # n8n writes logs asynchronously; short polling catches immediate failures.
+    for _ in range(6):
+        try:
+            lines = log_path.read_text(encoding="utf-8", errors="ignore").splitlines()[-1200:]
+        except Exception:
+            return None
+
+        recent_events = []
+        for line in lines:
+            try:
+                evt = json.loads(line)
+            except Exception:
+                continue
+
+            ts_raw = evt.get("ts")
+            if not ts_raw:
+                continue
+
+            try:
+                ts_epoch = datetime.fromisoformat(ts_raw).timestamp()
+            except Exception:
+                continue
+
+            if ts_epoch >= started_at_epoch - 1.0:
+                recent_events.append((ts_epoch, evt))
+
+        if recent_events:
+            started_ids = set()
+            for _, evt in recent_events:
+                if evt.get("eventName") != "n8n.workflow.started":
+                    continue
+                payload = evt.get("payload") or {}
+                if payload.get("workflowName") != N8N_INVITE_WORKFLOW_NAME:
+                    continue
+                exec_id = str(payload.get("executionId") or "").strip()
+                if exec_id:
+                    started_ids.add(exec_id)
+
+            for _, evt in recent_events:
+                if evt.get("eventName") != "n8n.workflow.failed":
+                    continue
+                payload = evt.get("payload") or {}
+                if payload.get("workflowName") != N8N_INVITE_WORKFLOW_NAME:
+                    continue
+                exec_id = str(payload.get("executionId") or "").strip()
+                # Match either known started execution or a very recent failed execution.
+                if exec_id and (exec_id in started_ids):
+                    return _normalize_n8n_error(payload.get("errorMessage", ""))
+                if not started_ids:
+                    return _normalize_n8n_error(payload.get("errorMessage", ""))
+
+        time.sleep(0.4)
+
+    return None
 
 
 def _is_strong_shortlist_candidate(candidate: dict, min_match_score: float = 7.0) -> bool:
@@ -101,6 +179,18 @@ def send_invite_via_n8n(
     n8n then sends the Gmail invite email.
     Returns (success, message).
     """
+    name = (name or "").strip()
+    email = (email or "").strip()
+    username = (username or "").strip()
+    password = (password or "").strip()
+    job_title = (job_title or "").strip()
+    deadline = (deadline or "").strip()
+
+    if not _is_valid_email(email):
+        return False, "Invalid candidate email; invite not sent."
+    if not username or not password:
+        return False, "Missing username/password for invite payload."
+
     try:
         payload = {
             "name":       name,
@@ -111,12 +201,18 @@ def send_invite_via_n8n(
             "login_url":  APP_URL,
             "deadline":   deadline,
         }
-        response = requests.post(N8N_INVITE_WEBHOOK, json=payload, timeout=10)
-        if 200 <= response.status_code < 300:
-            return True, "Webhook accepted"
 
-        detail = response.text.strip()[:200] if response.text else "no response body"
-        return False, f"HTTP {response.status_code}: {detail}"
+        started_at = time.time()
+        response = requests.post(N8N_INVITE_WEBHOOK, json=payload, timeout=10)
+        detail = response.text.strip()[:300] if response.text else "no response body"
+        if not (200 <= response.status_code < 300):
+            return False, f"HTTP {response.status_code}: {detail}"
+
+        downstream_error = _detect_recent_n8n_failure(started_at)
+        if downstream_error:
+            return False, downstream_error
+
+        return True, "Webhook accepted"
     except Exception as e:
         print(f"[jd_page] n8n webhook error for {email}: {e}")
         return False, str(e)

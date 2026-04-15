@@ -12,6 +12,7 @@ Features:
 - Browser-agnostic (Chrome, Edge, Firefox)
 """
 
+import io
 import tempfile
 import numpy as np
 import threading
@@ -36,19 +37,20 @@ WHISPER_SR = 16000   # Groq Whisper expects 16kHz
 BROWSER_SR = 48000   # WebRTC browser output is always 48kHz
 
 # ── VAD / silence constants ────────────────────────────────────────────────
-_SILENCE_RMS    = 0.003
+_SILENCE_RMS    = 0.0024
 _VAD_FRAME_MS   = 30
 _VAD_RMS_THRESH = 0.004
 _MIN_SPEECH_SEC = 1.5
 
 # Adaptive leveling and low-confidence guards for far-field microphone audio.
-_LEVEL_EST_RMS_THRESH = 0.0025
-_LEVEL_TARGET_SPEECH_RMS = 0.060
-_LEVEL_MAX_GAIN = 10.0
-_LEVEL_MIN_ACTIVITY_RATIO = 0.08
+_LEVEL_ACTIVITY_RMS_THRESH = 0.0018
+_LEVEL_EST_RMS_THRESH = 0.0022
+_LEVEL_TARGET_SPEECH_RMS = 0.045
+_LEVEL_MAX_GAIN = 4.0
+_LEVEL_MIN_ACTIVITY_RATIO = 0.06
 _LEVEL_HARD_LIMIT = 0.98
-_LOW_SIGNAL_RMS = 0.0028
-_LOW_SIGNAL_SPEECH_RATIO = 0.06
+_LOW_SIGNAL_RMS = 0.0022
+_LOW_SIGNAL_SPEECH_RATIO = 0.045
 
 # Common Whisper false positives on silence/noise.
 _HALLUCINATIONS = {
@@ -95,6 +97,108 @@ def _to_float32_mono(arr: np.ndarray) -> np.ndarray:
     
     # Clip to [-1, 1] and convert to float32
     return np.clip(arr, -1.0, 1.0).astype(np.float32)
+
+
+def _audio_frame_to_float32_mono(frame) -> np.ndarray:
+    """Convert a PyAV AudioFrame to float32 mono in [-1, 1]."""
+    arr = frame.to_ndarray()
+    if arr is None:
+        return np.array([], dtype=np.float32)
+
+    arr = np.asarray(arr)
+    if arr.size == 0:
+        return np.array([], dtype=np.float32)
+
+    fmt = getattr(frame.format, "name", "unknown")
+    frame_samples = getattr(frame, "samples", None)
+
+    def _finalize(mono_arr, scale=None):
+        out = np.asarray(mono_arr).reshape(-1).astype(np.float32)
+        if scale is not None:
+            out = out / float(scale)
+        if isinstance(frame_samples, int) and frame_samples > 0:
+            if out.size > frame_samples:
+                out = out[:frame_samples]
+            elif 0 < out.size < frame_samples:
+                out = np.pad(out, (0, frame_samples - out.size), mode="constant")
+        return np.clip(out, -1.0, 1.0)
+
+    if fmt == "fltp":
+        mono = arr.mean(axis=0) if arr.ndim == 2 else arr.reshape(-1)
+        return _finalize(mono)
+
+    if fmt == "s16p":
+        mono = arr.mean(axis=0) if arr.ndim == 2 else arr.reshape(-1)
+        return _finalize(mono, scale=32768.0)
+
+    if fmt == "s16":
+        if arr.ndim == 2 and arr.shape[0] == 1:
+            packed = arr.reshape(-1).astype(np.float32)
+            ch_count = 1
+            try:
+                layout = getattr(frame, "layout", None)
+                if layout is not None:
+                    ch_count = int(getattr(layout, "channels", 1) or 1)
+            except Exception:
+                ch_count = 1
+
+            if ch_count > 1 and packed.size >= ch_count:
+                usable = (packed.size // ch_count) * ch_count
+                if usable > 0:
+                    packed = packed[:usable].reshape(-1, ch_count).mean(axis=1)
+            return _finalize(packed, scale=32768.0)
+
+        mono = arr.mean(axis=0) if arr.ndim == 2 else arr.reshape(-1)
+        return _finalize(mono, scale=32768.0)
+
+    return _to_float32_mono(arr)
+
+
+def _save_float_audio_to_wav(audio: np.ndarray, sample_rate: int, source_label: str) -> Optional[str]:
+    """Normalize float audio, resample to 16kHz, and write to temp WAV."""
+    if audio is None:
+        print(f"[audio_capture] No {source_label} audio to save")
+        return None
+
+    audio = np.asarray(audio, dtype=np.float32).reshape(-1)
+    if audio.size == 0:
+        print(f"[audio_capture] Empty {source_label} audio after conversion")
+        return None
+
+    peak = float(np.abs(audio).max()) if audio.size else 0.0
+    if peak > 1.0:
+        audio = audio / peak
+    audio = np.clip(audio, -1.0, 1.0).astype(np.float32)
+
+    rms = float(np.sqrt(np.mean(audio ** 2)))
+    audio, gain, pre_rms, speech_rms = _apply_adaptive_leveling(audio, sample_rate)
+    post_rms = float(np.sqrt(np.mean(audio ** 2))) if len(audio) else 0.0
+
+    print(
+        f"[audio_capture] Prepared {source_label} audio: {len(audio)} samples @ {sample_rate}Hz"
+    )
+    print(
+        f"  RMS(raw)={rms:.6f}, RMS(pre)={pre_rms:.6f}, "
+        f"SpeechRMS={speech_rms:.6f}, Gain={gain:.2f}x, "
+        f"RMS(post)={post_rms:.6f}, Peak={np.abs(audio).max():.4f}"
+    )
+
+    audio16 = _resample(audio, sample_rate, WHISPER_SR)
+    audio_int16 = (audio16 * 32767).clip(-32768, 32767).astype(np.int16)
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+    tmp_path = tmp.name
+    tmp.close()
+
+    with wave.open(tmp_path, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(WHISPER_SR)
+        wf.writeframes(audio_int16.tobytes())
+
+    file_size = os.path.getsize(tmp_path)
+    print(f"[audio_capture] WAV saved: {tmp_path} ({file_size} bytes)")
+    return tmp_path
 
 
 def _resample(audio: np.ndarray, src_sr: int, tgt_sr: int) -> np.ndarray:
@@ -166,7 +270,8 @@ def _estimate_speech_rms(audio: np.ndarray, fs: int) -> float:
     rms_values = _frame_rms_values(audio, fs)
     if not rms_values:
         return 0.0
-    speech_threshold = max(_SILENCE_RMS, _LEVEL_EST_RMS_THRESH)
+    # Use a dedicated low threshold so far-field speech can still be estimated.
+    speech_threshold = _LEVEL_EST_RMS_THRESH
     speech_values = [v for v in rms_values if v > speech_threshold]
     if not speech_values:
         return 0.0
@@ -188,7 +293,7 @@ def _apply_adaptive_leveling(audio: np.ndarray, fs: int) -> tuple[np.ndarray, fl
     activity_ratio = _speech_activity_ratio(
         audio,
         fs,
-        threshold=max(_SILENCE_RMS, _LEVEL_EST_RMS_THRESH),
+        threshold=_LEVEL_ACTIVITY_RMS_THRESH,
     )
 
     if speech_rms <= 0.0 or activity_ratio < _LEVEL_MIN_ACTIVITY_RATIO:
@@ -233,7 +338,7 @@ def _has_enough_speech(audio: np.ndarray, fs: int) -> bool:
             current_run = 0
 
     # Need at least 500ms of consecutive speech.
-    min_consecutive = int(500 / _VAD_FRAME_MS)
+    min_consecutive = int((_MIN_SPEECH_SEC * 1000) / _VAD_FRAME_MS)
     return max_consecutive >= min_consecutive
 
 
@@ -356,8 +461,8 @@ def _transcribe_with_groq(wav_path: str, prompt: str = "") -> tuple[str, Optiona
     except Exception as e:
         return "", f"Failed to initialize transcription service: {str(e)[:100]}"
 
-    primary_model = "whisper-large-v3"
-    fallback_model = "whisper-large-v3-turbo"
+    primary_model = "whisper-large-v3-turbo"
+    fallback_model = "whisper-large-v3"
 
     text, error, status_code = _transcribe_with_model(primary_model)
     if not error:
@@ -419,37 +524,7 @@ def save_audio_frames_to_wav(frames: list, sample_rate: int = BROWSER_SR) -> Opt
             return None
         
         audio = np.concatenate(chunks)
-        rms = float(np.sqrt(np.mean(audio**2)))
-        audio, gain, pre_rms, speech_rms = _apply_adaptive_leveling(audio, sample_rate)
-        post_rms = float(np.sqrt(np.mean(audio**2))) if len(audio) else 0.0
-        
-        print(f"[audio_capture] Captured audio: {len(audio)} samples @ {sample_rate}Hz")
-        print(
-            f"  RMS(raw)={rms:.6f}, RMS(pre)={pre_rms:.6f}, "
-            f"SpeechRMS={speech_rms:.6f}, Gain={gain:.2f}x, "
-            f"RMS(post)={post_rms:.6f}, Peak={np.abs(audio).max():.4f}"
-        )
-
-        # Resample to 16kHz
-        audio16 = _resample(audio, sample_rate, WHISPER_SR)
-        
-        # Convert to 16-bit PCM
-        audio_int16 = (audio16 * 32767).clip(-32768, 32767).astype(np.int16)
-        
-        # Save to temporary WAV file
-        tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-        tmp_path = tmp.name
-        tmp.close()
-
-        with wave.open(tmp_path, 'wb') as wf:
-            wf.setnchannels(1)
-            wf.setsampwidth(2)
-            wf.setframerate(WHISPER_SR)
-            wf.writeframes(audio_int16.tobytes())
-
-        file_size = os.path.getsize(tmp_path)
-        print(f"[audio_capture] WAV saved: {tmp_path} ({file_size} bytes)")
-        return tmp_path
+        return _save_float_audio_to_wav(audio, sample_rate, source_label="browser")
 
     except Exception as e:
         print(f"[audio_capture] save_audio_frames_to_wav failed: {e}")
@@ -457,6 +532,104 @@ def save_audio_frames_to_wav(frames: list, sample_rate: int = BROWSER_SR) -> Opt
         traceback.print_exc()
         return None
 
+def save_audio_input_to_wav(audio_bytes: bytes, source_hint: str = "audio_input") -> Optional[str]:
+    """
+    Decode st.audio_input() bytes (WebM/OGG/MP4) → 16kHz mono WAV.
+    Uses PyAV (already installed via streamlit-webrtc) — no ffmpeg needed.
+    """
+    if not audio_bytes:
+        print("[audio] Empty audio_bytes")
+        return None
+
+    import io
+    try:
+        import av
+    except ImportError:
+        print("[audio] PyAV not available — run: pip install av")
+        return None
+
+    try:
+        buf = io.BytesIO(audio_bytes)
+        container = av.open(buf)
+
+        # Find the audio stream
+        audio_streams = [s for s in container.streams if s.type == "audio"]
+        if not audio_streams:
+            print("[audio] No audio stream found in input")
+            return None
+
+        src_sr = audio_streams[0].codec_context.sample_rate or 48000
+        print(f"[audio] Detected stream: sr={src_sr}, codec={audio_streams[0].codec_context.name}")
+
+        all_samples = []
+        for frame in container.decode(audio=0):
+            arr = frame.to_ndarray()
+            fmt = frame.format.name
+
+            if fmt == "fltp":
+                # Planar float32 — most common from Opus/WebM
+                mono = arr.mean(axis=0) if arr.ndim == 2 else arr.flatten()
+                mono = mono.astype(np.float32)
+
+            elif fmt in ("s16", "s16p"):
+                mono = arr.mean(axis=0) if arr.ndim == 2 else arr.flatten()
+                mono = mono.astype(np.float32) / 32768.0
+
+            elif fmt in ("s32", "s32p"):
+                mono = arr.mean(axis=0) if arr.ndim == 2 else arr.flatten()
+                mono = mono.astype(np.float32) / 2147483648.0
+
+            else:
+                # Unknown format — attempt generic conversion
+                mono = arr.flatten().astype(np.float32)
+                peak = float(np.abs(mono).max())
+                if peak > 1.0:
+                    mono /= peak
+
+            all_samples.append(np.clip(mono, -1.0, 1.0))
+
+        container.close()
+
+        if not all_samples:
+            print("[audio] No samples decoded")
+            return None
+
+        audio = np.concatenate(all_samples)
+        duration_sec = len(audio) / src_sr
+        rms = float(np.sqrt(np.mean(audio ** 2)))
+        print(f"[audio] Decoded: {len(audio)} samples, {duration_sec:.1f}s, RMS={rms:.4f}")
+
+        if duration_sec < 0.3:
+            print("[audio] Too short — likely empty recording")
+            return None
+
+        # Adaptive leveling + resample to 16kHz
+        audio, gain, pre_rms, speech_rms = _apply_adaptive_leveling(audio, src_sr)
+        audio16 = _resample(audio, src_sr, WHISPER_SR)
+        audio_int16 = (audio16 * 32767).clip(-32768, 32767).astype(np.int16)
+
+        post_rms = float(np.sqrt(np.mean(audio16 ** 2)))
+        print(f"[audio] gain={gain:.2f}x, pre_rms={pre_rms:.4f}, post_rms={post_rms:.4f}")
+
+        tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        tmp_path = tmp.name
+        tmp.close()
+
+        with wave.open(tmp_path, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(WHISPER_SR)
+            wf.writeframes(audio_int16.tobytes())
+
+        file_size = os.path.getsize(tmp_path)
+        print(f"[audio] WAV saved: {tmp_path} ({file_size} bytes)")
+        return tmp_path
+
+    except Exception as e:
+        print(f"[audio] save_audio_input_to_wav failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
 
 def transcribe_wav(
     wav_path: str,
@@ -575,7 +748,7 @@ def transcribe_wav(
             # Retry once with strict verbatim guidance when first result looks too short.
             if not error and text:
                 word_count = len([w for w in text.strip().split() if w])
-                weak_result = word_count <= 3 and (trimmed_rms < 0.020 or speech_ratio < 0.35)
+                weak_result = word_count <= 6 and (trimmed_rms < 0.018 or speech_ratio < 0.28)
                 if weak_result:
                     print("[audio_capture] Weak first transcript detected; retrying once with strict prompt")
                     retry_prompt = (
@@ -591,8 +764,19 @@ def transcribe_wav(
             # Filter Whisper hallucinations (common false positives on noise/silence).
             if not error and text:
                 normalized = text.strip().lower().rstrip(".")
-                weak_signal_text = len(text.strip()) < 8 and trimmed_rms < (_LOW_SIGNAL_RMS + 0.0005)
-                if normalized in _HALLUCINATIONS or weak_signal_text:
+                weak_signal_text = (
+                    len(text.strip()) < 5
+                    and trimmed_rms < (_LOW_SIGNAL_RMS + 0.00015)
+                    and speech_ratio < max(0.03, _LOW_SIGNAL_SPEECH_RATIO - 0.01)
+                )
+                likely_hallucination = (
+                    normalized in _HALLUCINATIONS
+                    and (
+                        trimmed_rms < (_LOW_SIGNAL_RMS + 0.0004)
+                        or speech_ratio < (_LOW_SIGNAL_SPEECH_RATIO + 0.02)
+                    )
+                )
+                if likely_hallucination or weak_signal_text:
                     print(f"[audio_capture] Filtered hallucination: '{text}'")
                     text = ""
                     error = "No clear speech detected. Please speak louder and try again."
