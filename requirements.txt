@@ -1,0 +1,42 @@
+# PsySense — Multimodal AI Behavioral Interview System
+# Requirements verified from working environment
+
+streamlit==1.52.2
+streamlit-webrtc==0.64.5
+fastapi==0.103.2
+uvicorn==0.42.0
+requests==2.32.5
+SQLAlchemy==2.0.48
+plotly==6.6.0
+av==16.1.0
+pydantic==1.10.26
+python-dotenv==1.2.2
+typing_extensions==4.15.0
+
+# ML / AI
+torch
+torchaudio
+transformers==5.3.0
+accelerate==1.13.0
+groq>=0.8.0
+
+# Audio / Video
+sounddevice==0.5.5
+scipy==1.15.3
+librosa==0.11.0
+opencv-python
+
+# Data
+numpy==1.26.4
+scikit-learn==1.7.2
+pandas==2.3.3
+psycopg2-binary==2.9.11
+
+# PDF / Resume
+fpdf2==2.8.7
+PyPDF2==3.0.1
+
+# Utilities
+bcrypt>=4.0.0
+gTTS==2.5.4
+reportlab

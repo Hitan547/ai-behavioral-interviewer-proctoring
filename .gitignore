@@ -1,0 +1,13 @@
+venv310/
+data/
+hf_cache/
+*.wav
+*.mp3
+*.pyc
+__pycache__/
+cloudflared.exe
+.env
+*.db
+psysense-emotion-ai/model/*.bin
+psysense-emotion-ai/model/*.pt
+psysense-emotion-ai/
