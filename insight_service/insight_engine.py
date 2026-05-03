@@ -28,16 +28,16 @@ def generate_insight(avg_cognitive: float, avg_emotion: float,
     else:
         weaknesses.append("answers lack structure, depth and clear reasoning")
 
-    # ── Emotion / speech analysis ─────────────────────────────────────────
+    # ── Delivery / communication analysis ─────────────────────────────────
     if avg_emotion >= 7.5:
-        strengths.append("confident and positive communication style")
+        strengths.append("clear delivery and steady communication")
     elif avg_emotion >= 6:
-        strengths.append("emotionally stable during responses")
-        weaknesses.append("could show more enthusiasm and energy in delivery")
+        strengths.append("generally steady communication delivery")
+        weaknesses.append("could improve vocal energy and delivery clarity")
     elif avg_emotion >= 4:
-        weaknesses.append("signs of hesitation or low confidence in communication")
+        weaknesses.append("delivery showed hesitation and should be reviewed")
     else:
-        weaknesses.append("signs of stress or low confidence during communication")
+        weaknesses.append("delivery signal needs review for clarity and steadiness")
 
     # ── Engagement analysis ───────────────────────────────────────────────
     if avg_engagement >= 8:

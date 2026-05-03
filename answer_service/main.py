@@ -28,6 +28,11 @@ def root():
     return {"message": "Answer Intelligence Service Running", "version": "3.0"}
 
 
+@app.get("/health")
+def health():
+    return {"status": "ok", "service": "answer_service", "version": "3.0"}
+
+
 @app.post("/evaluate_answer")
 def evaluate(req: AnswerRequest):
     if not req.answer or not req.answer.strip():

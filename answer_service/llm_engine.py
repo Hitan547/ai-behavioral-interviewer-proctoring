@@ -19,11 +19,11 @@ if _ENV_PATH.exists():
 else:
     load_dotenv()
 
-_api_key = (os.environ.get("GROQ_API_KEY") or "").strip()
+_api_key = (os.environ.get("GROQ_API_KEY_2") or os.environ.get("GROQ_API_KEY") or "").strip()
 if not _api_key and _ENV_PATH.exists():
     # Recover from inherited blank environment variables.
     load_dotenv(dotenv_path=_ENV_PATH, override=True)
-    _api_key = (os.environ.get("GROQ_API_KEY") or "").strip()
+    _api_key = (os.environ.get("GROQ_API_KEY_2") or os.environ.get("GROQ_API_KEY") or "").strip()
 
 if not _api_key:
     raise EnvironmentError(

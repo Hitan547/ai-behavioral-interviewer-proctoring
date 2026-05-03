@@ -186,7 +186,10 @@ def test_audio_processing():
         print_test("SciPy", False, "Not installed - audio resampling will use fallback")
     
     try:
-        from audio_capture_robust import save_audio_frames_to_wav, transcribe_wav
+        from audio_capture_robust import (
+            save_webrtc_frames_to_wav as save_audio_frames_to_wav,
+            transcribe_wav,
+        )
         print_test("Audio Capture Module", True, "Imported successfully")
     except Exception as e:
         print_test("Audio Capture Module", False, str(e))

@@ -19,8 +19,8 @@ try:
     LIBROSA_AVAILABLE = True
 except ImportError:
     LIBROSA_AVAILABLE = False
-    print("⚠️ librosa not installed. Run: pip install librosa")
-    print("   Voice scoring will return neutral 5.0 until installed.")
+    print("[WARNING] librosa not installed. Run: pip install librosa")
+    print("          Voice scoring will return neutral 5.0 until installed.")
 
 
 def compute_voice_score(wav_path: str) -> float:

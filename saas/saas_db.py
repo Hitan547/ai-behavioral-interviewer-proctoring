@@ -10,17 +10,10 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 from datetime import datetime, timedelta
 import uuid, os, json
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./psysense.db")
-if DATABASE_URL.startswith("sqlite:///"):
-    _db_path = DATABASE_URL.replace("sqlite:///", "")
-    _db_dir  = os.path.dirname(_db_path)
-    if _db_dir:
-        os.makedirs(_db_dir, exist_ok=True)
-engine = create_engine(
-    DATABASE_URL,
-    connect_args={"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
-)
-SessionLocal = sessionmaker(bind=engine)
+# Reuse the same engine and session factory as database.py to avoid
+# duplicate connection pools and SQLite lock contention.
+from database import engine, SessionLocal
+
 Base = declarative_base()
 
 

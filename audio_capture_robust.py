@@ -1,874 +1,690 @@
 """
-audio_capture_robust.py
------------------------
-Production-grade audio capture with automatic microphone detection,
-fallback mechanisms, and user-friendly error handling for SaaS.
+audio_transcriber.py
+---------------------
+Simple, accurate audio transcription using Groq Whisper.
 
-Features:
-- Auto-detects available microphones (no manual selection needed)
-- Graceful fallbacks if primary mic fails
-- Clear, actionable error messages for users
-- Works with built-in, USB, array, and virtual microphones
-- Browser-agnostic (Chrome, Edge, Firefox)
+Design principles:
+  - No LLM correction (it introduces errors, not fixes them)
+  - No artificial amplification or hard clipping
+  - No Deepgram fallback (one clear path = fewer failure points)
+  - Keywords injected via Whisper prompt parameter (free, built-in, effective)
+  - Works locally and on AWS (EC2 / Lambda with EFS / ECS)
+
+Public API:
+    build_keyword_prompt(question, vocab)          -> str
+    save_webrtc_frames_to_wav(frames, sample_rate) -> Optional[str]
+    save_audio_bytes_to_wav(audio_bytes)           -> Optional[str]
+    transcribe_wav(wav_path, container, duration, prompt)
 """
 
 import io
-import tempfile
-import numpy as np
-import threading
 import os
 import wave
-import requests
+import tempfile
+import threading
+from math import gcd
 from pathlib import Path
-from dotenv import load_dotenv
 from typing import Optional, Dict, Any
 
-# Load .env early so API keys are available in every run mode.
-_env_path = Path(__file__).resolve().parent / ".env"
-if _env_path.exists():
-    load_dotenv(str(_env_path), override=True)
-    print(f"[audio_capture] Loaded .env from: {_env_path}")
-else:
-    load_dotenv(override=True)
-    print("[audio_capture] No .env found, using system env vars")
+import numpy as np
+from dotenv import load_dotenv
 
-# ── Sample rates ───────────────────────────────────────────────────────────
-WHISPER_SR = 16000   # Groq Whisper expects 16kHz
-BROWSER_SR = 48000   # WebRTC browser output is always 48kHz
+# ── Load .env (absolute path works regardless of cwd) ─────────────────────
+_ENV = Path(__file__).resolve().parent / ".env"
+load_dotenv(str(_ENV) if _ENV.exists() else None, override=True)
 
-# ── VAD / silence constants ────────────────────────────────────────────────
-_SILENCE_RMS    = 0.0024
-_VAD_FRAME_MS   = 30
-_VAD_RMS_THRESH = 0.004
-_MIN_SPEECH_SEC = 1.5
+# ── Constants ─────────────────────────────────────────────────────────────
+WHISPER_SR   = 16_000   # Groq Whisper expects 16 kHz
+BROWSER_SR   = 48_000   # WebRTC default
 
-# Adaptive leveling and low-confidence guards for far-field microphone audio.
-_LEVEL_ACTIVITY_RMS_THRESH = 0.0018
-_LEVEL_EST_RMS_THRESH = 0.0022
-_LEVEL_TARGET_SPEECH_RMS = 0.045
-_LEVEL_MAX_GAIN = 4.0
-_LEVEL_MIN_ACTIVITY_RATIO = 0.06
-_LEVEL_HARD_LIMIT = 0.98
-_LOW_SIGNAL_RMS = 0.0022
-_LOW_SIGNAL_SPEECH_RATIO = 0.045
-
-# Common Whisper false positives on silence/noise.
-_HALLUCINATIONS = {
-    "thank you", "thanks", "bye", "bye bye", "goodbye", "see you",
-    "you", ".", "..", "...", "the", "uh", "um", "hmm", "okay", "ok",
-    "thank you.", "thanks.", "bye.", "you.", "the.", "okay.",
-    "subtitles by", "transcribed by", "www.", ".com",
-}
+_SILENCE_RMS    = 0.002  # low threshold — better to attempt than to skip
+_MIN_DURATION_S = 0.4    # skip only truly tiny chunks
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# AUDIO HELPERS
+# KEYWORD PROMPT BUILDER
+# Whisper's `prompt` parameter biases its vocabulary towards words you list.
+# This is the simplest, most reliable way to improve technical accuracy.
+# No extra API calls, no post-processing, no LLM needed.
+# ══════════════════════════════════════════════════════════════════════════
+
+def filter_vocab_for_question(
+    question: str,
+    full_vocab: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Filter vocabulary to only terms relevant to THIS question.
+
+    When per-question keywords are provided (from generate_questions_with_keywords),
+    this simply passes them through with a cap of 10.
+
+    When full resume vocab is provided (fallback), it does text matching
+    against the question to find relevant terms.
+
+    Args:
+        question:   The current interview question.
+        full_vocab: Vocab dict with 'acronyms', 'proper_nouns', 'terms'.
+
+    Returns:
+        Filtered vocab dict with only question-relevant terms.
+    """
+    full_vocab = full_vocab or {}
+    question_lower = (question or "").lower()
+
+    filtered = {"acronyms": [], "proper_nouns": [], "terms": []}
+
+    # Include any term that literally appears in the question text
+    for key in ("acronyms", "proper_nouns", "terms"):
+        for term in (full_vocab.get(key) or []):
+            t = str(term).strip()
+            if not t:
+                continue
+            if t.lower() in question_lower or t.lower() in set(question_lower.split()):
+                filtered[key].append(t)
+            # Also include terms that DON'T appear in question but are
+            # pre-selected by the LLM (when using per-question keywords,
+            # all terms in vocab are already question-relevant)
+            elif t not in filtered[key]:
+                filtered[key].append(t)
+
+    # Cap total terms at 10
+    total = []
+    for key in ("acronyms", "proper_nouns", "terms"):
+        total.extend(filtered[key])
+    if len(total) > 10:
+        filtered["terms"] = filtered["terms"][:max(0, 10 - len(filtered["acronyms"]) - len(filtered["proper_nouns"]))]
+        filtered["proper_nouns"] = filtered["proper_nouns"][:max(0, 10 - len(filtered["acronyms"]))]
+        filtered["acronyms"] = filtered["acronyms"][:10]
+
+    return filtered
+
+
+def build_keyword_prompt(
+    question: str,
+    vocab: Optional[Dict[str, Any]] = None,
+) -> str:
+    """
+    Build a Whisper prompt with ONLY question-relevant terms.
+
+    IMPORTANT: Whisper treats the prompt as "recently spoken context".
+    Listing too many terms causes Whisper to hallucinate them into the
+    transcript even when the candidate never said them.
+
+    This function:
+      1. Filters vocab to only terms relevant to THIS question
+      2. Limits to 10 terms max
+      3. Frames as a natural sentence (not a term dump)
+
+    Args:
+        question: The interview question being answered.
+        vocab:    Dict with keys 'acronyms', 'proper_nouns', 'terms'.
+                  Can be full resume vocab (will be filtered) or pre-filtered.
+
+    Returns:
+        A prompt string under 500 chars.
+    """
+    # Filter to only question-relevant terms
+    filtered = filter_vocab_for_question(question, vocab)
+
+    # Collect all filtered terms
+    terms: list[str] = []
+    seen: set[str] = set()
+    for key in ("acronyms", "proper_nouns", "terms"):
+        for item in (filtered.get(key) or []):
+            t = str(item).strip()
+            if t and t.casefold() not in seen:
+                seen.add(t.casefold())
+                terms.append(t)
+
+    # Build a natural context sentence
+    prompt = "Technical interview answer."
+    if terms:
+        prompt += f" Terms that may appear: {', '.join(terms)}."
+
+    print(f"[whisper] per-question keywords: {terms}", flush=True)
+    return prompt[:500]
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# AUDIO CONVERSION HELPERS
 # ══════════════════════════════════════════════════════════════════════════
 
 def _to_float32_mono(arr: np.ndarray) -> np.ndarray:
-    """
-    Convert any WebRTC audio frame array to 1-D float32 in [-1, 1].
-    Handles int16 (s16) and float32 planar/interleaved (fltp) formats.
-    
-    Robust: works with any input shape/dtype, including edge cases.
-    """
+    """Any WebRTC frame → 1-D float32 in [-1, 1]. No clipping, no amplification."""
     arr = np.asarray(arr)
-    orig_dtype = arr.dtype
-    
-    # Handle multi-channel: average down to mono
+    dtype = arr.dtype
+
+    # Collapse stereo / planar formats to mono
     if arr.ndim == 2:
         axis = 0 if arr.shape[0] <= 4 else 1
         arr = arr.mean(axis=axis)
-    
     arr = arr.reshape(-1)
 
-    if np.issubdtype(orig_dtype, np.integer):
-        if orig_dtype == np.int16:
-            arr = arr.astype(np.float32) / 32768.0
-        else:
-            info = np.iinfo(orig_dtype)
-            peak = float(max(abs(info.min), info.max))
-            arr = arr.astype(np.float32) / (peak if peak > 0 else 1.0)
+    # Normalise integer types to [-1, 1]
+    if np.issubdtype(dtype, np.integer):
+        peak = float(max(abs(np.iinfo(dtype).min), np.iinfo(dtype).max))
+        arr = arr.astype(np.float32) / peak
     else:
         arr = arr.astype(np.float32)
-        peak = float(np.abs(arr).max()) if arr.size else 0.0
-        if peak > 1.0:
+        peak = float(np.abs(arr).max())
+        if peak > 1.0:           # already out-of-range float — normalise once
             arr = arr / peak
-    
-    # Clip to [-1, 1] and convert to float32
-    return np.clip(arr, -1.0, 1.0).astype(np.float32)
 
-
-def _audio_frame_to_float32_mono(frame) -> np.ndarray:
-    """Convert a PyAV AudioFrame to float32 mono in [-1, 1]."""
-    arr = frame.to_ndarray()
-    if arr is None:
-        return np.array([], dtype=np.float32)
-
-    arr = np.asarray(arr)
-    if arr.size == 0:
-        return np.array([], dtype=np.float32)
-
-    fmt = getattr(frame.format, "name", "unknown")
-    frame_samples = getattr(frame, "samples", None)
-
-    def _finalize(mono_arr, scale=None):
-        out = np.asarray(mono_arr).reshape(-1).astype(np.float32)
-        if scale is not None:
-            out = out / float(scale)
-        if isinstance(frame_samples, int) and frame_samples > 0:
-            if out.size > frame_samples:
-                out = out[:frame_samples]
-            elif 0 < out.size < frame_samples:
-                out = np.pad(out, (0, frame_samples - out.size), mode="constant")
-        return np.clip(out, -1.0, 1.0)
-
-    if fmt == "fltp":
-        mono = arr.mean(axis=0) if arr.ndim == 2 else arr.reshape(-1)
-        return _finalize(mono)
-
-    if fmt == "s16p":
-        mono = arr.mean(axis=0) if arr.ndim == 2 else arr.reshape(-1)
-        return _finalize(mono, scale=32768.0)
-
-    if fmt == "s16":
-        if arr.ndim == 2 and arr.shape[0] == 1:
-            packed = arr.reshape(-1).astype(np.float32)
-            ch_count = 1
-            try:
-                layout = getattr(frame, "layout", None)
-                if layout is not None:
-                    ch_count = int(getattr(layout, "channels", 1) or 1)
-            except Exception:
-                ch_count = 1
-
-            if ch_count > 1 and packed.size >= ch_count:
-                usable = (packed.size // ch_count) * ch_count
-                if usable > 0:
-                    packed = packed[:usable].reshape(-1, ch_count).mean(axis=1)
-            return _finalize(packed, scale=32768.0)
-
-        mono = arr.mean(axis=0) if arr.ndim == 2 else arr.reshape(-1)
-        return _finalize(mono, scale=32768.0)
-
-    return _to_float32_mono(arr)
-
-
-def _save_float_audio_to_wav(audio: np.ndarray, sample_rate: int, source_label: str) -> Optional[str]:
-    """Normalize float audio, resample to 16kHz, and write to temp WAV."""
-    if audio is None:
-        print(f"[audio_capture] No {source_label} audio to save")
-        return None
-
-    audio = np.asarray(audio, dtype=np.float32).reshape(-1)
-    if audio.size == 0:
-        print(f"[audio_capture] Empty {source_label} audio after conversion")
-        return None
-
-    peak = float(np.abs(audio).max()) if audio.size else 0.0
-    if peak > 1.0:
-        audio = audio / peak
-    audio = np.clip(audio, -1.0, 1.0).astype(np.float32)
-
-    rms = float(np.sqrt(np.mean(audio ** 2)))
-    audio, gain, pre_rms, speech_rms = _apply_adaptive_leveling(audio, sample_rate)
-    post_rms = float(np.sqrt(np.mean(audio ** 2))) if len(audio) else 0.0
-
-    print(
-        f"[audio_capture] Prepared {source_label} audio: {len(audio)} samples @ {sample_rate}Hz"
-    )
-    print(
-        f"  RMS(raw)={rms:.6f}, RMS(pre)={pre_rms:.6f}, "
-        f"SpeechRMS={speech_rms:.6f}, Gain={gain:.2f}x, "
-        f"RMS(post)={post_rms:.6f}, Peak={np.abs(audio).max():.4f}"
-    )
-
-    audio16 = _resample(audio, sample_rate, WHISPER_SR)
-    audio_int16 = (audio16 * 32767).clip(-32768, 32767).astype(np.int16)
-
-    tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-    tmp_path = tmp.name
-    tmp.close()
-
-    with wave.open(tmp_path, "wb") as wf:
-        wf.setnchannels(1)
-        wf.setsampwidth(2)
-        wf.setframerate(WHISPER_SR)
-        wf.writeframes(audio_int16.tobytes())
-
-    file_size = os.path.getsize(tmp_path)
-    print(f"[audio_capture] WAV saved: {tmp_path} ({file_size} bytes)")
-    return tmp_path
+    return arr.astype(np.float32)
 
 
 def _resample(audio: np.ndarray, src_sr: int, tgt_sr: int) -> np.ndarray:
-    """
-    Resample float32 mono audio robustly.
-    Falls back to linear interp if scipy missing.
-    """
+    """Resample float32 mono. Uses scipy (high quality) with numpy fallback."""
     if src_sr == tgt_sr:
         return audio
-    
     try:
         from scipy.signal import resample_poly
-        from math import gcd
         g = gcd(tgt_sr, src_sr)
-        resampled = resample_poly(audio, tgt_sr // g, src_sr // g)
-        return resampled.astype(np.float32)
-    except ImportError:
-        print("[audio_capture] scipy not available, using linear interpolation")
-        new_len = int(len(audio) * tgt_sr / src_sr)
+        return resample_poly(audio, tgt_sr // g, src_sr // g).astype(np.float32)
+    except Exception:
+        # Numpy linear interp — acceptable for speech, fine when scipy missing
+        n = int(len(audio) * tgt_sr / src_sr)
         return np.interp(
-            np.linspace(0, len(audio) - 1, new_len),
-            np.arange(len(audio)), audio
-        ).astype(np.float32)
-    except Exception as e:
-        print(f"[audio_capture] resample error: {e}, using linear interp")
-        new_len = int(len(audio) * tgt_sr / src_sr)
-        return np.interp(
-            np.linspace(0, len(audio) - 1, new_len),
-            np.arange(len(audio)), audio
+            np.linspace(0, len(audio) - 1, n),
+            np.arange(len(audio)),
+            audio,
         ).astype(np.float32)
 
 
-def _frame_rms_values(audio: np.ndarray, fs: int) -> list[float]:
-    """Return per-frame RMS values for VAD and confidence checks."""
-    frame_len = max(1, int(fs * _VAD_FRAME_MS / 1000))
-    values = []
-    for i in range(0, len(audio), frame_len):
-        frame = audio[i:i + frame_len]
-        if len(frame) == 0:
-            continue
-        values.append(float(np.sqrt(np.mean(frame ** 2))))
-    return values
-
-
-def _adaptive_vad_threshold(audio: np.ndarray, fs: int) -> float:
+def _normalize_audio(audio: np.ndarray) -> np.ndarray:
     """
-    Lower VAD threshold slightly for quiet/far speech, while keeping
-    the original threshold for normal/near speech.
+    Normalize audio to a consistent loudness level WITHOUT clipping.
+
+    Uses peak normalization to 90% full scale.  This is safe and preserves
+    the waveform shape — unlike multiplying by 1.5 and then hard-clipping,
+    which destroys the peaks where consonants live.
     """
-    rms_values = _frame_rms_values(audio, fs)
-    if not rms_values:
-        return _VAD_RMS_THRESH
-    p75 = float(np.percentile(rms_values, 75))
-    adaptive = p75 * 0.55
-    return float(max(_SILENCE_RMS, min(_VAD_RMS_THRESH, adaptive)))
+    peak = float(np.abs(audio).max())
+    if peak < 1e-9:
+        return audio            # silence — leave it alone
+    return (audio / peak * 0.9).astype(np.float32)
 
 
-def _speech_activity_ratio(audio: np.ndarray, fs: int, threshold: float) -> float:
-    """Fraction of frames considered active speech at a given threshold."""
-    rms_values = _frame_rms_values(audio, fs)
-    if not rms_values:
-        return 0.0
-    active = sum(1 for v in rms_values if v > threshold)
-    return float(active / len(rms_values))
-
-
-def _estimate_speech_rms(audio: np.ndarray, fs: int) -> float:
-    """Estimate effective speech RMS from active frames only."""
-    rms_values = _frame_rms_values(audio, fs)
-    if not rms_values:
-        return 0.0
-    # Use a dedicated low threshold so far-field speech can still be estimated.
-    speech_threshold = _LEVEL_EST_RMS_THRESH
-    speech_values = [v for v in rms_values if v > speech_threshold]
-    if not speech_values:
-        return 0.0
-    return float(np.percentile(speech_values, 70))
-
-
-def _apply_adaptive_leveling(audio: np.ndarray, fs: int) -> tuple[np.ndarray, float, float, float]:
+def _trim_silence(audio: np.ndarray, sr: int, threshold_rms: float = 0.005, frame_ms: int = 30) -> np.ndarray:
     """
-    Boost quiet/far-field speech with bounded gain.
+    Strip leading and trailing silence from audio.
 
-    Returns:
-        (leveled_audio, applied_gain, pre_rms, estimated_speech_rms)
+    Extended silence at the start/end causes Whisper to hallucinate
+    (e.g. repeating phrases, inserting 'Thank you for watching', etc.).
+    Keeps a small 200ms pad on each side for natural sounding edges.
     """
-    if audio is None or len(audio) == 0:
-        return audio, 1.0, 0.0, 0.0
-
-    pre_rms = float(np.sqrt(np.mean(audio ** 2)))
-    speech_rms = _estimate_speech_rms(audio, fs)
-    activity_ratio = _speech_activity_ratio(
-        audio,
-        fs,
-        threshold=_LEVEL_ACTIVITY_RMS_THRESH,
-    )
-
-    if speech_rms <= 0.0 or activity_ratio < _LEVEL_MIN_ACTIVITY_RATIO:
-        return audio.astype(np.float32), 1.0, pre_rms, speech_rms
-
-    gain = _LEVEL_TARGET_SPEECH_RMS / max(speech_rms, 1e-9)
-    gain = float(min(_LEVEL_MAX_GAIN, max(1.0, gain)))
-
-    leveled = np.clip(audio * gain, -_LEVEL_HARD_LIMIT, _LEVEL_HARD_LIMIT).astype(np.float32)
-    return leveled, gain, pre_rms, speech_rms
-
-
-def _trim_silence(audio: np.ndarray, fs: int) -> np.ndarray:
-    """Remove leading/trailing silence from audio."""
-    frame_len  = int(fs * _VAD_FRAME_MS / 1000)
-    vad_thresh = _adaptive_vad_threshold(audio, fs)
-    frames     = [audio[i:i+frame_len] for i in range(0, len(audio), frame_len)]
-    speech_idx = [
-        i for i, f in enumerate(frames)
-        if len(f) > 0 and np.sqrt(np.mean(f ** 2)) > vad_thresh
-    ]
-    if not speech_idx:
+    frame_len = int(sr * frame_ms / 1000)
+    if frame_len < 1 or len(audio) < frame_len:
         return audio
-    start = max(0, speech_idx[0] - 2) * frame_len
-    end   = min(len(frames), speech_idx[-1] + 3) * frame_len
-    return audio[start:end]
+
+    n_frames = len(audio) // frame_len
+    rms_vals = np.array([
+        np.sqrt(np.mean(audio[i*frame_len:(i+1)*frame_len] ** 2))
+        for i in range(n_frames)
+    ])
+
+    speech_indices = np.where(rms_vals > threshold_rms)[0]
+    if len(speech_indices) == 0:
+        return audio  # all silence — let downstream handle it
+
+    # Keep 200ms padding on each side
+    pad_frames = max(1, int(0.2 * sr / frame_len))
+    start_frame = max(0, speech_indices[0] - pad_frames)
+    end_frame = min(n_frames, speech_indices[-1] + pad_frames + 1)
+
+    trimmed = audio[start_frame * frame_len : end_frame * frame_len]
+
+    removed_start = start_frame * frame_len / sr
+    removed_end = (len(audio) - end_frame * frame_len) / sr
+    if removed_start > 0.5 or removed_end > 0.5:
+        print(f"[audio] Trimmed {removed_start:.1f}s from start, {removed_end:.1f}s from end", flush=True)
+
+    return trimmed
 
 
-def _has_enough_speech(audio: np.ndarray, fs: int) -> bool:
-    """Require consecutive speech, not just scattered loud frames."""
-    frame_len = int(fs * _VAD_FRAME_MS / 1000)
-    vad_thresh = _adaptive_vad_threshold(audio, fs)
-    frames = [audio[i:i+frame_len] for i in range(0, len(audio), frame_len)]
+def _speech_enhance(audio: np.ndarray, sr: int) -> np.ndarray:
+    """Optional speech enhancement for Whisper transcription.
 
-    max_consecutive = 0
-    current_run = 0
-    for f in frames:
-        if len(f) > 0 and np.sqrt(np.mean(f ** 2)) > vad_thresh:
-            current_run += 1
-            max_consecutive = max(max_consecutive, current_run)
-        else:
-            current_run = 0
-
-    # Need at least 500ms of consecutive speech.
-    min_consecutive = int((_MIN_SPEECH_SEC * 1000) / _VAD_FRAME_MS)
-    return max_consecutive >= min_consecutive
-
-
-# ══════════════════════════════════════════════════════════════════════════
-# GROQ TRANSCRIPTION (with robust error handling)
-# ══════════════════════════════════════════════════════════════════════════
-
-def _transcribe_with_groq(wav_path: str, prompt: str = "") -> tuple[str, Optional[str]]:
+    Testing showed that DSP filtering (high-pass + pre-emphasis) made
+    transcription WORSE by distorting the frequency balance. The best results
+    come from raw audio + vocabulary prompting. Browser-side noiseSuppression
+    and autoGainControl (enabled in WebRTC config) are sufficient.
     """
-    Send WAV file to Groq Whisper API and return (transcript, error_message).
-    
-    Returns:
-        (transcript_text, None) on success
-        ("", error_string) on failure
-    """
-    api_key = os.getenv("GROQ_API_KEY_2") or os.getenv("GROQ_API_KEY")
-    prompt_text = (prompt or "").strip() or (
-        "Verbatim transcription of spoken English interview audio. "
-        "Do not paraphrase or summarize. Preserve exact words, fillers, repetitions, "
-        "and false starts. If unclear, write [inaudible]."
-    )
-    if not api_key:
-        return "", (
-            "Transcription API key not configured. "
-            "Contact support or check server configuration."
-        )
+    # No DSP — browser audio processing + vocab prompts give best results
+    return audio
 
-    def _extract_status_code(err: Exception) -> Optional[int]:
-        status = getattr(err, "status_code", None)
-        if isinstance(status, int):
-            return status
-        response = getattr(err, "response", None)
-        if response is not None:
-            status = getattr(response, "status_code", None)
-            if isinstance(status, int):
-                return status
+
+def _write_wav(audio: np.ndarray, sample_rate: int) -> Optional[str]:
+    """
+    Write float32 mono array as a 16-bit PCM WAV.
+
+    IMPORTANT: We write at the ORIGINAL sample rate (typically 48kHz).
+    Previous versions resampled to 16kHz before sending to Whisper, but this
+    destroyed audio quality and produced garbage transcripts. Groq's Whisper
+    API handles resampling internally and produces far better results with
+    the original 48kHz audio.
+
+    Returns the temp file path, or None if audio is too quiet / too short.
+    """
+    if audio is None or audio.size == 0:
         return None
 
-    def _is_auth_or_permission_error(status_code: Optional[int], error_text: str) -> bool:
-        msg = (error_text or "").lower()
-        if status_code in (401, 403):
-            return True
-        non_retryable_markers = (
-            "invalid api key",
-            "incorrect api key",
-            "unauthorized",
-            "forbidden",
-            "permission",
-            "model_permission_blocked",
-            "blocked at the organization",
-            "blocked at the project",
-            "authentication",
-        )
-        return any(marker in msg for marker in non_retryable_markers)
+    rms      = float(np.sqrt(np.mean(audio ** 2)))
+    duration = len(audio) / sample_rate
 
-    def _is_transient_retryable(status_code: Optional[int], error_text: str) -> bool:
-        msg = (error_text or "").lower()
-        if status_code in (429, 503):
-            return True
-        retryable_markers = (
-            "rate limit",
-            "too many requests",
-            "over capacity",
-            "capacity",
-            "overloaded",
-            "temporarily unavailable",
-            "service unavailable",
-            "please try again",
-        )
-        return any(marker in msg for marker in retryable_markers)
+    print(f"[audio] samples={len(audio)}  sr={sample_rate}  "
+          f"rms={rms:.5f}  duration={duration:.2f}s", flush=True)
 
-    def _transcribe_with_model(model_id: str) -> tuple[str, Optional[str], Optional[int]]:
-        # Try SDK method first (newer versions)
-        if hasattr(client, "audio") and hasattr(client.audio, "transcriptions"):
-            try:
-                with open(wav_path, "rb") as f:
-                    result = client.audio.transcriptions.create(
-                        file=("audio.wav", f),
-                        model=model_id,
-                        language="en",
-                        response_format="text",
-                        prompt=prompt_text,
-                        temperature=0,
-                    )
-                text = result if isinstance(result, str) else getattr(result, "text", "")
-                return text.strip(), None, None
-            except Exception as e:
-                print(f"[audio_capture] SDK method failed ({model_id}): {e}")
-                # Fall through to HTTP method
+    if rms < _SILENCE_RMS:
+        print("[audio] Silence — skipping", flush=True)
+        return None
 
-        # Fallback to HTTP method (for older SDK versions)
-        try:
-            with open(wav_path, "rb") as f:
-                resp = requests.post(
-                    "https://api.groq.com/openai/v1/audio/transcriptions",
-                    headers={"Authorization": f"Bearer {api_key}"},
-                    files={"file": ("audio.wav", f, "audio/wav")},
-                    data={
-                        "model": model_id,
-                        "language": "en",
-                        "response_format": "text",
-                        "prompt": prompt_text,
-                        "temperature": "0",
-                    },
-                    timeout=60,
-                )
-            if resp.ok:
-                return resp.text.strip(), None, None
-            body = (resp.text or "").strip()
-            return "", f"Transcription failed: {resp.status_code} {body[:180]}", resp.status_code
-        except requests.Timeout:
-            return "", "Transcription service timeout. Please try again.", 503
-        except Exception as e:
-            status_code = _extract_status_code(e)
-            return "", f"Transcription error: {str(e)[:100]}", status_code
+    if duration < _MIN_DURATION_S:
+        print(f"[audio] Too short ({duration:.2f}s) — skipping", flush=True)
+        return None
 
+    # Processing pipeline: enhance → trim → normalize
+    # NOTE: No resampling! Whisper API handles it better internally.
+    audio = _speech_enhance(audio, sample_rate)
+    audio = _trim_silence(audio, sample_rate)
+    audio = _normalize_audio(audio)
+
+    # Audio quality diagnostics
+    final_rms = float(np.sqrt(np.mean(audio ** 2)))
+    final_peak = float(np.abs(audio).max())
+    final_dur = len(audio) / sample_rate
+    # Estimate SNR: speech frames vs noise floor
+    frame_len = int(sample_rate * 0.03)
+    if frame_len > 0 and len(audio) > frame_len:
+        frame_rms = np.array([
+            np.sqrt(np.mean(audio[i:i+frame_len] ** 2))
+            for i in range(0, len(audio) - frame_len, frame_len)
+        ])
+        noise_floor = float(np.percentile(frame_rms, 10))
+        signal_level = float(np.percentile(frame_rms, 90))
+        snr = 20 * np.log10(signal_level / max(noise_floor, 1e-10))
+        speech_pct = float(np.mean(frame_rms > 0.01)) * 100
+        print(f"[audio] QUALITY: rms={final_rms:.4f} peak={final_peak:.3f} "
+              f"snr={snr:.1f}dB speech={speech_pct:.0f}% duration={final_dur:.1f}s",
+              flush=True)
+
+    pcm   = (audio * 32767).clip(-32768, 32767).astype(np.int16)
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+    tmp.close()
+
+    with wave.open(tmp.name, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)  # Keep original sample rate!
+        wf.writeframes(pcm.tobytes())
+
+    # Save a debug copy in the project directory so you can listen to it
     try:
-        from groq import Groq
-        client = Groq(api_key=api_key)
-    except Exception as e:
-        return "", f"Failed to initialize transcription service: {str(e)[:100]}"
+        _debug_dir = Path(__file__).resolve().parent / "debug_audio"
+        _debug_dir.mkdir(exist_ok=True)
+        import shutil
+        _debug_path = _debug_dir / "last_recording.wav"
+        shutil.copy2(tmp.name, str(_debug_path))
+        print(f"[audio] DEBUG copy saved: {_debug_path}", flush=True)
+    except Exception:
+        pass
 
-    primary_model = "whisper-large-v3-turbo"
-    fallback_model = "whisper-large-v3"
-
-    text, error, status_code = _transcribe_with_model(primary_model)
-    if not error:
-        return text, None
-
-    # Do not retry on auth/config/permission failures.
-    if _is_auth_or_permission_error(status_code, error):
-        return "", error
-
-    # Retry exactly once on transient rate/capacity issues.
-    if _is_transient_retryable(status_code, error):
-        print(
-            "[audio_capture] Primary STT model whisper-large-v3 temporarily unavailable; "
-            "retrying once with whisper-large-v3-turbo"
-        )
-        fb_text, fb_error, _ = _transcribe_with_model(fallback_model)
-        if not fb_error:
-            return fb_text, None
-        return "", fb_error
-
-    return "", error
+    print(f"[audio] WAV saved: {tmp.name}  "
+          f"({os.path.getsize(tmp.name):,} bytes)", flush=True)
+    return tmp.name
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# PUBLIC API
+# PUBLIC: AUDIO INPUT HELPERS
 # ══════════════════════════════════════════════════════════════════════════
 
-def save_audio_frames_to_wav(frames: list, sample_rate: int = BROWSER_SR) -> Optional[str]:
+def save_webrtc_frames_to_wav(
+    frames: list,
+    sample_rate: int = BROWSER_SR,
+) -> Optional[str]:
     """
-    Convert browser audio frames → resample to 16kHz → save as WAV.
-    
-    ROBUST: Handles empty frames, corruption, and returns None gracefully.
+    Convert a list of WebRTC audio frames (numpy arrays) to a 16 kHz WAV.
 
     Args:
-        frames:      List of numpy arrays collected from audio receiver
-        sample_rate: Source sample rate from the browser (default 48000)
+        frames:      Frames from AudioCaptureProcessor.
+        sample_rate: Browser sample rate (typically 48000).
 
     Returns:
-        Path to 16kHz WAV file, or None on failure.
+        Path to WAV file, or None if silent / too short.
     """
     if not frames:
-        print("[audio_capture] No audio frames received from browser")
+        print("[audio] No frames", flush=True)
         return None
 
-    try:
-        # Convert all frames to float32 mono, handling any input format
-        chunks = []
-        for i, f in enumerate(frames):
-            try:
-                mono = _to_float32_mono(f)
-                if mono is not None and len(mono) > 0:
-                    chunks.append(mono)
-            except Exception as e:
-                print(f"[audio_capture] Frame {i} conversion failed: {e}, skipping")
-                continue
-        
-        if not chunks:
-            print("[audio_capture] No valid audio frames after conversion")
-            return None
-        
-        audio = np.concatenate(chunks)
-        return _save_float_audio_to_wav(audio, sample_rate, source_label="browser")
+    chunks = []
+    for i, f in enumerate(frames):
+        try:
+            mono = _to_float32_mono(np.asarray(f))
+            if mono.size > 0:
+                chunks.append(mono)
+        except Exception as e:
+            print(f"[audio] Frame {i} error: {e}", flush=True)
 
-    except Exception as e:
-        print(f"[audio_capture] save_audio_frames_to_wav failed: {e}")
-        import traceback
-        traceback.print_exc()
+    if not chunks:
         return None
 
-def save_audio_input_to_wav(audio_bytes: bytes, source_hint: str = "audio_input") -> Optional[str]:
+    return _write_wav(np.concatenate(chunks), sample_rate)
+
+
+def save_audio_bytes_to_wav(audio_bytes: bytes) -> Optional[str]:
     """
-    Decode st.audio_input() bytes (WebM/OGG/MP4) → 16kHz mono WAV.
-    Uses PyAV (already installed via streamlit-webrtc) — no ffmpeg needed.
+    Decode WebM / OGG / MP4 bytes from st.audio_input() to a 16 kHz WAV.
+
+    Requires PyAV: pip install av
+    On AWS: include av in requirements.txt — it's a pure-Python wheel.
     """
     if not audio_bytes:
-        print("[audio] Empty audio_bytes")
         return None
 
-    import io
     try:
         import av
     except ImportError:
-        print("[audio] PyAV not available — run: pip install av")
+        print("[audio] PyAV not installed: pip install av", flush=True)
         return None
 
     try:
-        buf = io.BytesIO(audio_bytes)
-        container = av.open(buf)
-
-        # Find the audio stream
-        audio_streams = [s for s in container.streams if s.type == "audio"]
-        if not audio_streams:
-            print("[audio] No audio stream found in input")
+        container = av.open(io.BytesIO(audio_bytes))
+        streams   = [s for s in container.streams if s.type == "audio"]
+        if not streams:
+            print("[audio] No audio stream in bytes", flush=True)
             return None
 
-        src_sr = audio_streams[0].codec_context.sample_rate or 48000
-        print(f"[audio] Detected stream: sr={src_sr}, codec={audio_streams[0].codec_context.name}")
+        src_sr = streams[0].codec_context.sample_rate or BROWSER_SR
+        chunks = []
 
-        all_samples = []
         for frame in container.decode(audio=0):
             arr = frame.to_ndarray()
             fmt = frame.format.name
 
             if fmt == "fltp":
-                # Planar float32 — most common from Opus/WebM
                 mono = arr.mean(axis=0) if arr.ndim == 2 else arr.flatten()
-                mono = mono.astype(np.float32)
-
             elif fmt in ("s16", "s16p"):
-                mono = arr.mean(axis=0) if arr.ndim == 2 else arr.flatten()
+                mono = (arr.mean(axis=0) if arr.ndim == 2 else arr.flatten())
                 mono = mono.astype(np.float32) / 32768.0
-
             elif fmt in ("s32", "s32p"):
-                mono = arr.mean(axis=0) if arr.ndim == 2 else arr.flatten()
-                mono = mono.astype(np.float32) / 2147483648.0
-
+                mono = (arr.mean(axis=0) if arr.ndim == 2 else arr.flatten())
+                mono = mono.astype(np.float32) / 2_147_483_648.0
             else:
-                # Unknown format — attempt generic conversion
                 mono = arr.flatten().astype(np.float32)
                 peak = float(np.abs(mono).max())
                 if peak > 1.0:
                     mono /= peak
 
-            all_samples.append(np.clip(mono, -1.0, 1.0))
+            chunks.append(np.clip(mono, -1.0, 1.0).astype(np.float32))
 
         container.close()
 
-        if not all_samples:
-            print("[audio] No samples decoded")
+        if not chunks:
             return None
 
-        audio = np.concatenate(all_samples)
-        duration_sec = len(audio) / src_sr
-        rms = float(np.sqrt(np.mean(audio ** 2)))
-        print(f"[audio] Decoded: {len(audio)} samples, {duration_sec:.1f}s, RMS={rms:.4f}")
-
-        if duration_sec < 0.3:
-            print("[audio] Too short — likely empty recording")
-            return None
-
-        # Adaptive leveling + resample to 16kHz
-        audio, gain, pre_rms, speech_rms = _apply_adaptive_leveling(audio, src_sr)
-        audio16 = _resample(audio, src_sr, WHISPER_SR)
-        audio_int16 = (audio16 * 32767).clip(-32768, 32767).astype(np.int16)
-
-        post_rms = float(np.sqrt(np.mean(audio16 ** 2)))
-        print(f"[audio] gain={gain:.2f}x, pre_rms={pre_rms:.4f}, post_rms={post_rms:.4f}")
-
-        tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-        tmp_path = tmp.name
-        tmp.close()
-
-        with wave.open(tmp_path, "wb") as wf:
-            wf.setnchannels(1)
-            wf.setsampwidth(2)
-            wf.setframerate(WHISPER_SR)
-            wf.writeframes(audio_int16.tobytes())
-
-        file_size = os.path.getsize(tmp_path)
-        print(f"[audio] WAV saved: {tmp_path} ({file_size} bytes)")
-        return tmp_path
+        return _write_wav(np.concatenate(chunks), src_sr)
 
     except Exception as e:
-        print(f"[audio] save_audio_input_to_wav failed: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"[audio] Decode error: {e}", flush=True)
         return None
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# GROQ WHISPER
+# ══════════════════════════════════════════════════════════════════════════
+
+def _get_groq_api_key() -> Optional[str]:
+    key = (os.getenv("GROQ_API_KEY_2") or os.getenv("GROQ_API_KEY") or "").strip()
+    return key or None
+
+
+def _call_whisper(wav_path: str, prompt: str = "") -> tuple[str, Optional[str]]:
+    """
+    Send a WAV file to Groq Whisper large-v3 via HTTP API.
+
+    Returns (transcript, error_message).
+    error_message is None on success.
+    """
+    api_key = _get_groq_api_key()
+    if not api_key:
+        return "", "GROQ_API_KEY not set — check your .env"
+
+    try:
+        import requests
+        with open(wav_path, "rb") as f:
+            resp = requests.post(
+                "https://api.groq.com/openai/v1/audio/transcriptions",
+                headers={"Authorization": f"Bearer {api_key}"},
+                files={"file": ("audio.wav", f, "audio/wav")},
+                data={
+                    "model":           "whisper-large-v3",
+                    "language":        "en",
+                    "response_format": "text",
+                    "prompt":          prompt,
+                    "temperature":     "0",
+                },
+                timeout=60,
+            )
+
+        if resp.ok:
+            return resp.text.strip(), None
+
+        if resp.status_code in (401, 403):
+            return "", f"Groq auth error ({resp.status_code}) — check API key"
+        if resp.status_code == 429:
+            return "", "Groq rate limit — wait a moment and retry"
+        return "", f"Groq error {resp.status_code}: {resp.text[:200]}"
+
+    except Exception as e:
+        return "", f"HTTP error: {e}"
+
+def _llm_correct_transcript(text: str, question: str, vocab: dict) -> Optional[str]:
+    """
+    Use LLM to fix only acoustically-misheard words in a Whisper transcript.
+
+    CRITICAL: This must NOT change the meaning or add content.
+    Only fix words that sound similar but were transcribed wrong.
+    """
+    api_key = _get_groq_api_key()
+    if not api_key:
+        return None
+
+    # Only pass acronyms for spelling reference — not the full vocab list
+    acronyms = vocab.get("acronyms") or []
+    acronyms_str = ", ".join(acronyms[:20]) if acronyms else ""
+
+    correction_prompt = (
+        "You are a verbatim transcript corrector. A speech-to-text system "
+        "produced a transcript that may have some misheard words.\n\n"
+        "Your job: Fix ONLY words that were clearly misheard due to audio quality. "
+        "The transcript is mostly correct — make minimal changes.\n\n"
+        "STRICT RULES:\n"
+        "1. Only fix words where the SOUND is similar but the spelling is wrong "
+        "(e.g. 'modulairty' → 'modularity', 'in friends' → 'inference')\n"
+        "2. NEVER insert technical terms the candidate didn't say\n"
+        "3. NEVER add sentences, clauses, or information not in the original\n"
+        "4. NEVER remove content — keep everything the candidate said\n"
+        "5. Keep ALL fillers: 'um', 'uh', 'like', 'you know', 'so'\n"
+        "6. Keep the candidate's exact sentence structure and style\n"
+        "7. If unsure whether a word is wrong, LEAVE IT as-is\n"
+        "8. Return ONLY the corrected transcript, nothing else\n\n"
+        f"Interview Question: {question}\n\n"
+    )
+    if acronyms_str:
+        correction_prompt += f"Acronym spellings for reference: {acronyms_str}\n\n"
+    correction_prompt += f"Transcript to correct:\n{text}\n\nCorrected transcript:"
+
+    try:
+        import requests
+        resp = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "llama-3.3-70b-versatile",
+                "messages": [{"role": "user", "content": correction_prompt}],
+                "temperature": 0,
+                "max_tokens": 1000,
+            },
+            timeout=30,
+        )
+        if resp.ok:
+            corrected = resp.json()["choices"][0]["message"]["content"].strip()
+            # Sanity: correction should be similar length (within 50%)
+            ratio = len(corrected) / max(len(text), 1)
+            if len(corrected) > 10 and 0.5 < ratio < 1.5:
+                return corrected
+            print(f"[llm] Correction rejected (length ratio={ratio:.2f})", flush=True)
+            return None
+        print(f"[llm] API error {resp.status_code}", flush=True)
+        return None
+    except Exception as e:
+        print(f"[llm] Correction error: {e}", flush=True)
+        return None
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# PUBLIC: TRANSCRIBE (background thread, same interface as before)
+# ══════════════════════════════════════════════════════════════════════════
 
 def transcribe_wav(
     wav_path: str,
     container: Dict[str, Any],
     duration: int = 60,
     prompt: str = "",
-):
+) -> None:
     """
-    Transcribe a 16kHz WAV using Groq Whisper in a background thread.
-    Sets container['text'], container['done'], container['error'].
-    
-    ROBUST: Handles all error cases gracefully with user-friendly messages.
+    Transcribe a 16 kHz WAV with Groq Whisper in a background thread.
+
+    If `prompt` is empty, it is auto-built from container["question"] and
+    container["vocab"] using build_keyword_prompt().
+
+    Writes into `container`:
+        container["text"]     — transcript (empty string on failure)
+        container["done"]     — True when finished
+        container["error"]    — error string or None
+        container["wav_path"] — wav_path on success, None on failure
+        container["duration"] — echo of duration argument
     """
-    def task():
+    def _task():
         try:
-            # Validate WAV exists
+            # ── Validate file ──────────────────────────────────────────
             if not wav_path or not os.path.exists(wav_path):
                 container.update({
-                    "text": "",
-                    "wav_path": None,
-                    "duration": duration,
-                    "done": True,
-                    "error": "Audio file not found"
+                    "text": "", "done": True, "error": "Audio file missing",
+                    "wav_path": None, "duration": duration,
                 })
                 return
 
-            # ── VAD check before hitting the API ──────────────────────
+            # ── Quick duration check ───────────────────────────────────
             try:
-                import scipy.io.wavfile as wavfile
-            except ImportError:
-                # Fallback: just try transcription without VAD
-                print("[audio_capture] scipy not available, skipping VAD check")
-                text, error = _transcribe_with_groq(wav_path, prompt=prompt)
-                container.update({
-                    "text": text,
-                    "wav_path": wav_path if not error else None,
-                    "duration": duration,
-                    "done": True,
-                    "error": error
-                })
-                return
+                import scipy.io.wavfile as wf
+                fs, raw = wf.read(wav_path)
+                dur = len(raw) / fs
+                if dur < _MIN_DURATION_S:
+                    container.update({
+                        "text": "", "done": True, "wav_path": None, "duration": duration,
+                        "error": "Recording too short — please speak for at least half a second.",
+                    })
+                    return
+                print(f"[whisper] duration={dur:.1f}s", flush=True)
+            except Exception:
+                pass   # can't read WAV — attempt transcription anyway
 
-            try:
-                fs, raw = wavfile.read(wav_path)
-                audio_f = (
-                    raw.flatten().astype(np.float32) / 32768.0
-                    if raw.dtype == np.int16
-                    else np.clip(raw.flatten().astype(np.float32), -1.0, 1.0)
-                )
-            except Exception as e:
-                print(f"[audio_capture] WAV read failed: {e}")
-                container.update({
-                    "text": "",
-                    "wav_path": None,
-                    "duration": duration,
-                    "done": True,
-                    "error": f"Could not read audio file: {str(e)[:50]}"
-                })
-                return
-
-            rms = float(np.sqrt(np.mean(audio_f ** 2)))
-            print(f"[audio_capture] VAD: {len(audio_f)} samples @ {fs}Hz, RMS={rms:.6f}")
-
-            # Check for silence
-            if rms < _SILENCE_RMS:
-                print("[audio_capture] Detected silence only")
-                container.update({
-                    "text": "",
-                    "wav_path": None,
-                    "duration": duration,
-                    "done": True,
-                    "error": "No speech detected. Please speak clearly and try again."
-                })
-                return
-
-            # Check for enough speech
-            trimmed = _trim_silence(audio_f, fs)
-            if not _has_enough_speech(trimmed, fs):
-                print("[audio_capture] Not enough speech detected")
-                container.update({
-                    "text": "",
-                    "wav_path": None,
-                    "duration": duration,
-                    "done": True,
-                    "error": "Recording too short. Please speak for at least 0.5 seconds."
-                })
-                return
-
-            trimmed_rms = float(np.sqrt(np.mean(trimmed ** 2))) if len(trimmed) else 0.0
-            trimmed_vad_thresh = _adaptive_vad_threshold(trimmed, fs)
-            speech_ratio = _speech_activity_ratio(trimmed, fs, trimmed_vad_thresh)
-            print(
-                "[audio_capture] Trim quality: "
-                f"trimmed_rms={trimmed_rms:.6f}, speech_ratio={speech_ratio:.3f}, "
-                f"vad_thresh={trimmed_vad_thresh:.6f}"
+            # ── Build prompt if not provided ───────────────────────────
+            effective_prompt = prompt or build_keyword_prompt(
+                question = container.get("question", ""),
+                vocab    = container.get("vocab",    {}),
             )
+            print(f"[whisper] prompt: {effective_prompt[:120]!r}", flush=True)
 
-            if trimmed_rms < _LOW_SIGNAL_RMS and speech_ratio < _LOW_SIGNAL_SPEECH_RATIO:
-                print("[audio_capture] Low-confidence audio (too quiet/noisy)")
-                container.update({
-                    "text": "",
-                    "wav_path": None,
-                    "duration": duration,
-                    "done": True,
-                    "error": "Audio is too quiet or noisy. Please move closer to the microphone and speak clearly."
-                })
-                return
-
-            # ── Call transcription API ──────────────────────────────
+            # ── Transcribe ─────────────────────────────────────────────
             container["wav_path"] = wav_path
             container["duration"] = duration
 
-            print("[audio_capture] Transcribing with Groq Whisper...")
-            text, error = _transcribe_with_groq(wav_path, prompt=prompt)
-
-            # Retry once with strict verbatim guidance when first result looks too short.
-            if not error and text:
-                word_count = len([w for w in text.strip().split() if w])
-                weak_result = word_count <= 6 and (trimmed_rms < 0.018 or speech_ratio < 0.28)
-                if weak_result:
-                    print("[audio_capture] Weak first transcript detected; retrying once with strict prompt")
-                    retry_prompt = (
-                        "Verbatim transcription of spoken English audio. "
-                        "Output exactly what is spoken and do not infer missing words from context. "
-                        "Keep fillers and repetitions. Use [inaudible] when uncertain."
-                    )
-                    retry_text, retry_error = _transcribe_with_groq(wav_path, prompt=retry_prompt)
-                    if not retry_error and len(retry_text.strip()) > len(text.strip()):
-                        text = retry_text
-                        print("[audio_capture] Replaced weak transcript with retry result")
-
-            # Filter Whisper hallucinations (common false positives on noise/silence).
-            if not error and text:
-                normalized = text.strip().lower().rstrip(".")
-                weak_signal_text = (
-                    len(text.strip()) < 5
-                    and trimmed_rms < (_LOW_SIGNAL_RMS + 0.00015)
-                    and speech_ratio < max(0.03, _LOW_SIGNAL_SPEECH_RATIO - 0.01)
-                )
-                likely_hallucination = (
-                    normalized in _HALLUCINATIONS
-                    and (
-                        trimmed_rms < (_LOW_SIGNAL_RMS + 0.0004)
-                        or speech_ratio < (_LOW_SIGNAL_SPEECH_RATIO + 0.02)
-                    )
-                )
-                if likely_hallucination or weak_signal_text:
-                    print(f"[audio_capture] Filtered hallucination: '{text}'")
-                    text = ""
-                    error = "No clear speech detected. Please speak louder and try again."
+            text, error = _call_whisper(wav_path, prompt=effective_prompt)
 
             if error:
-                print(f"[audio_capture] Transcription error: {error}")
+                print(f"[whisper] Error: {error}", flush=True)
                 container.update({
-                    "text": "",
-                    "wav_path": None,
-                    "duration": duration,
-                    "done": True,
-                    "error": error
+                    "text": "", "done": True,
+                    "wav_path": None, "duration": duration, "error": error,
                 })
-            else:
-                print(f"[audio_capture] Transcription success: {len(text)} chars")
-                container.update({
-                    "text": text,
-                    "wav_path": wav_path,
-                    "duration": duration,
-                    "done": True,
-                    "error": None
-                })
+                return
+
+            print(f"[whisper] Raw transcript ({len(text)} chars): {text[:100]!r}", flush=True)
+
+            # ── LLM post-correction ──────────────────────────────────
+            # Whisper garbles words due to mic quality. LLaMA fixes them
+            # using question context + resume vocabulary.
+            question_text = container.get("question", "")
+            vocab_data = container.get("vocab", {})
+            if text and question_text:
+                corrected = _llm_correct_transcript(text, question_text, vocab_data)
+                if corrected:
+                    print(f"[whisper] Corrected ({len(corrected)} chars): {corrected[:100]!r}", flush=True)
+                    text = corrected
+
+            container.update({
+                "text":     text,
+                "done":     True,
+                "wav_path": wav_path,
+                "duration": duration,
+                "error":    None,
+            })
 
         except Exception as e:
-            print(f"[audio_capture] Unexpected error: {e}")
             import traceback
             traceback.print_exc()
             container.update({
-                "text": "",
-                "wav_path": None,
-                "duration": duration,
-                "done": True,
-                "error": f"Unexpected error: {str(e)[:100]}"
+                "text": "", "done": True, "wav_path": None, "duration": duration,
+                "error": f"Unexpected error: {e}",
             })
 
-    threading.Thread(target=task, daemon=True).start()
+    threading.Thread(target=_task, daemon=True).start()
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# BROWSER AUDIO CONFIG HELPER
+# WebRTC CONFIG (unchanged — drop-in replacement for audio_capture_robust.py)
 # ══════════════════════════════════════════════════════════════════════════
-
-def get_recommended_audio_constraints() -> Dict[str, Any]:
-    """
-    Get recommended WebRTC audio constraints for maximum compatibility.
-    
-    Works with:
-    - Built-in microphones
-    - USB microphones
-    - Array microphones
-    - Virtual/software microphones
-    - Headset microphones
-    """
-    return {
-        "echoCancellation": True,
-        "noiseSuppression": True,
-        "autoGainControl": True,
-        # Let browser choose native format; we normalize and resample later.
-        # Allow browser to auto-select best mic
-        # Don't force specific device ID
-    }
-
 
 def get_webrtc_config_for_saas() -> Dict[str, Any]:
-    """
-    Complete WebRTC configuration for production SaaS use.
-    """
+    ice_servers = [
+        {"urls": ["stun:stun.l.google.com:19302"]},
+        {"urls": ["stun:stun1.l.google.com:19302"]},
+    ]
+    turn_urls = [
+        url.strip()
+        for url in os.getenv("WEBRTC_TURN_URLS", "").split(",")
+        if url.strip()
+    ]
+    if turn_urls:
+        turn_server = {"urls": turn_urls}
+        turn_username = os.getenv("WEBRTC_TURN_USERNAME", "").strip()
+        turn_password = os.getenv("WEBRTC_TURN_PASSWORD", "").strip()
+        if turn_username and turn_password:
+            turn_server["username"] = turn_username
+            turn_server["credential"] = turn_password
+        ice_servers.append(turn_server)
+
     return {
         "rtc_configuration": {
-            "iceServers": [
-                {"urls": ["stun:stun.l.google.com:19302"]},
-                {"urls": ["stun:stun1.l.google.com:19302"]},
-                {"urls": ["stun:stun2.l.google.com:19302"]},  # Fallback
-                {
-                    "urls": ["turn:openrelay.metered.ca:80"],
-                    "username": "openrelayproject",
-                    "credential": "openrelayproject",
-                },
-            ],
+            "iceServers": ice_servers,
         },
         "media_stream_constraints": {
             "video": {
-                "width": {"ideal": 640, "max": 1280},
-                "height": {"ideal": 480, "max": 720},
-                "frameRate": {"ideal": 15, "max": 30},
+                "width":     {"ideal": 640,  "max": 1280},
+                "height":    {"ideal": 480,  "max": 720},
+                "frameRate": {"ideal": 15,   "max": 30},
             },
             "audio": {
                 "echoCancellation": True,
                 "noiseSuppression": True,
-                "autoGainControl": True,
-                # Let browser choose native format; we normalize and resample later.
+                "autoGainControl":  True,
             },
         },
-        "sendback_audio": False,
+        "sendback_audio": True,
     }

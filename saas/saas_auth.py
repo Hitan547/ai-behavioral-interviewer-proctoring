@@ -54,20 +54,17 @@ def show_saas_login_signup():
         """, unsafe_allow_html=True)
 
         st.markdown('<div class="ps-card" style="padding:24px 26px">', unsafe_allow_html=True)
-        
-        auth_mode = st.radio(
-            "I am a",
-            ["🏢  Recruiter (login)", "🏢  Recruiter (signup)", "🎤  Candidate (login)"],
-            horizontal=True,
-            label_visibility="collapsed"
+
+        tab_recruiter_login, tab_recruiter_signup, tab_candidate = st.tabs(
+            ["Recruiter Login", "Recruiter Signup", "Candidate Login"]
         )
 
-        if auth_mode == "🏢  Recruiter (signup)":
-            show_recruiter_signup()
-        elif auth_mode == "🎤  Candidate (login)":
-            show_candidate_login()
-        else:
+        with tab_recruiter_login:
             show_recruiter_login()
+        with tab_recruiter_signup:
+            show_recruiter_signup()
+        with tab_candidate:
+            show_candidate_login()
 
         st.markdown('</div>', unsafe_allow_html=True)
         
@@ -93,6 +90,8 @@ def show_candidate_login():
                 st.session_state.auth_username = user["username"]
                 st.session_state.auth_display_name = user["display_name"]
                 st.session_state.user_email = user.get("email")
+                if user.get("org_id"):
+                    st.session_state.org_id = user["org_id"]
                 if user["role"] == "recruiter":
                     from database import SessionLocal, User
                     _db = SessionLocal()
@@ -105,8 +104,8 @@ def show_candidate_login():
                 # Load candidate's assigned JD if exists
                 if user["role"] == "student":
                     st.session_state.candidate_name = user["display_name"]
-                    from database import get_profile_by_username, get_job_posting_by_id
-                    profile = get_profile_by_username(user["username"])
+                    from database import get_profile_for_candidate, get_job_posting_by_id
+                    profile = get_profile_for_candidate(user["username"], user.get("email"))
                     if profile:
                         st.session_state.jd_id = profile.jd_id
                         posting = get_job_posting_by_id(profile.jd_id)
@@ -249,10 +248,16 @@ def show_recruiter_signup():
               </div>
             </div>
             """, unsafe_allow_html=True)
-            
-            st.info(f"**Redirecting to login in 3 seconds...**")
+
+            # Auto-login the new recruiter
+            st.session_state.logged_in = True
+            st.session_state.user_role = "recruiter"
+            st.session_state.auth_username = username
+            st.session_state.auth_display_name = org_name.strip()
+            st.session_state.user_email = email.strip()
+            st.session_state.org_id = org_id
             import time
-            time.sleep(3)
+            time.sleep(1)
             st.rerun()
             
         except Exception as e:
@@ -278,6 +283,8 @@ def show_recruiter_login():
                 st.session_state.auth_username     = user["username"]
                 st.session_state.auth_display_name = user["display_name"]
                 st.session_state.user_email        = user.get("email")
+                if user.get("org_id"):
+                    st.session_state.org_id = user["org_id"]
 
                 # Load org_id
                 from database import SessionLocal, User

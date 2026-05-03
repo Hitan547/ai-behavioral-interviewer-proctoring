@@ -1,11 +1,16 @@
-def compute_final_score(cognitive_score, emotion_score):
+def compute_final_score(cognitive_score, emotion_score, engagement_score=5.0):
     """
     Mini Fusion:
-    70% Cognitive
-    30% Emotion
+    70% Answer Quality
+    15% Delivery Signal (emotion_score wire field kept for compatibility)
+    15% Attentiveness
     """
 
-    final_score_10 = (0.7 * cognitive_score) + (0.3 * emotion_score)
+    final_score_10 = (
+        (0.70 * cognitive_score)
+        + (0.15 * emotion_score)
+        + (0.15 * engagement_score)
+    )
 
     final_score_100 = round(final_score_10 * 10, 2)
 

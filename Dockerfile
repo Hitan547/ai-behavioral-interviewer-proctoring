@@ -8,8 +8,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     curl \
     build-essential \
+    libportaudio2 \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    libsm6 \
+    libxrender1 \
+    libxext6 \
     && rm -rf /var/lib/apt/lists/*
-
 # Copy requirements first for better layer caching
 COPY requirements.txt .
 
@@ -63,8 +68,9 @@ ENV TRANSFORMERS_CACHE=/app/hf_cache \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 
-# Create non-root user for security.
-RUN useradd -m -u 1000 psysense && chown -R psysense:psysense /app
+# Create log directory and non-root user for security.
+RUN mkdir -p /app/logs && \
+    useradd -m -u 1000 psysense && chown -R psysense:psysense /app
 USER psysense
 
 # Expose all required ports.
@@ -73,7 +79,11 @@ EXPOSE 8000 8001 8002 8003 8004 8501
 # Health check for user-facing UI and active emotion API.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=180s --retries=3 \
     CMD curl -fsS http://localhost:8501/_stcore/health && \
-        curl -fsS http://localhost:8002/health || exit 1
+        curl -fsS http://localhost:8000/health && \
+        curl -fsS http://localhost:8001/health && \
+        curl -fsS http://localhost:8002/health && \
+        curl -fsS http://localhost:8003/health && \
+        curl -fsS http://localhost:8004/health || exit 1
 
 # Start all services with supervisor (auto-restart on crash).
 CMD ["/usr/local/bin/supervisord", "-c", "/etc/supervisord.conf"]

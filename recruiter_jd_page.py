@@ -29,12 +29,12 @@ from database import (
     create_candidate_account,
     verify_login,
     mark_invite_sent,
-    get_all_job_postings,
+    get_job_postings_by_org,
     get_job_posting_by_id,
     get_candidates_by_jd,
     get_jd_stats,
     check_expired_invites,
-    close_job_posting,
+    close_job_posting_for_org,
 )
 from matching_service.matcher import score_all_resumes
 
@@ -42,7 +42,7 @@ load_dotenv()
 
 # n8n webhook URL for candidate invite emails
 # Set this in your .env as N8N_INVITE_WEBHOOK
-N8N_INVITE_WEBHOOK = os.getenv("N8N_INVITE_WEBHOOK", "http://localhost:5678/webhook/candidate-invite")
+N8N_INVITE_WEBHOOK = os.getenv("N8N_INVITE_WEBHOOK", "https://hitan2004.app.n8n.cloud/webhook/candidate-invite")
 N8N_INVITE_WORKFLOW_NAME = os.getenv("N8N_INVITE_WORKFLOW_NAME", "My workflow 2")
 
 # Your app's login URL — change to your Cloudflare tunnel URL in production
@@ -425,7 +425,8 @@ def _show_shortlist_review():
 
         # Checkbox
         checked = cols[0].checkbox(
-            "", value=st.session_state.jd_selections.get(key, True),
+            f"Include {r.get('filename', 'candidate')}",
+            value=st.session_state.jd_selections.get(key, True),
             key=f"sel_{key}",
             label_visibility="collapsed",
         )
@@ -528,6 +529,7 @@ def _send_invites(selected, job_title, jd_text, min_pass_score, deadline_date):
             min_pass_score  = min_pass_score,
             deadline        = deadline_dt,
             recruiter_email = _recruiter_email,
+            org_id          = st.session_state.get("org_id"),
         )
 
     progress = st.progress(0, text="Creating accounts and sending invites...")
@@ -544,6 +546,16 @@ def _send_invites(selected, job_title, jd_text, min_pass_score, deadline_date):
 
         try:
             # Step 2: Save candidate profile
+            questions, q_keywords, vocab = [], [], {}
+            try:
+                from resume_parser import generate_questions_with_keywords
+                questions, q_keywords, vocab = generate_questions_with_keywords(
+                    r.get("resume_text", ""),
+                    jd_text=jd_text,
+                )
+            except Exception as e:
+                print(f"[invite] Question pre-generation failed for {r['name']}: {e}", flush=True)
+
             profile_id = save_candidate_profile(
                 name            = r["name"],
                 email           = r["email"],
@@ -554,6 +566,9 @@ def _send_invites(selected, job_title, jd_text, min_pass_score, deadline_date):
                 match_reason    = r["match_reason"],
                 key_matches     = r.get("key_matches", []),
                 key_gaps        = r.get("key_gaps",    []),
+                questions       = questions,
+                keywords        = q_keywords,
+                vocab           = vocab,
             )
 
             # Step 3: Create student account
@@ -646,16 +661,30 @@ def _send_invites(selected, job_title, jd_text, min_pass_score, deadline_date):
         f"Job Posting ID: `{jd_id}`"
     )
 
-    # Show credentials table (important if email failed)
-    st.markdown("**Candidate Credentials** — Save this. Passwords shown once only.")
+    st.markdown("**Invite Delivery**")
+    st.caption(
+        "Passwords are hidden after successful email delivery. "
+        "Use recovery credentials only when an invite email was not sent."
+    )
 
     for log in results_log:
         with st.container(border=True):
-            cols = st.columns([2, 1.5, 1.5, 2])
+            cols = st.columns([2, 1.5, 2])
             cols[0].markdown(f"**{log['name']}**  \n{log.get('email', '')}")
-            cols[1].code(log.get("username", "—"))
-            cols[2].code(log.get("password", "—"))
-            cols[3].markdown(log["status"])
+            cols[1].code(log.get("username", "No username"))
+            cols[2].markdown(log["status"])
+
+            password = log.get("password")
+            status_text = log.get("status", "")
+            should_show_recovery = bool(password) and "Invite sent" not in status_text
+            if should_show_recovery:
+                with st.expander(f"Recovery credentials for {log['name']}"):
+                    st.caption(
+                        "Share these only if the candidate did not receive the invite email."
+                    )
+                    rc1, rc2 = st.columns(2)
+                    rc1.code(log.get("username", "No username"))
+                    rc2.code(password)
 
     # Clear session state for fresh start
     if st.button("➕ Create Another Job Posting", use_container_width=True):
@@ -673,7 +702,7 @@ def _send_invites(selected, job_title, jd_text, min_pass_score, deadline_date):
 def _show_active_postings_tab():
     """Show all job postings with candidate status breakdown."""
 
-    postings = get_all_job_postings()
+    postings = get_job_postings_by_org(st.session_state.get("org_id"))
 
     if not postings:
         st.info("No job postings yet. Create one in the 'New Job Posting' tab.")
@@ -734,6 +763,6 @@ def _show_active_postings_tab():
                     key=f"close_{posting.id}",
                     help="Mark this job as closed — no new interviews",
                 ):
-                    close_job_posting(posting.id)
+                    close_job_posting_for_org(posting.id, st.session_state.get("org_id"))
                     st.success("Posting closed.")
                     st.rerun()

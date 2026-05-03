@@ -16,7 +16,7 @@ set EMOTION_SERVICE_URL=http://127.0.0.1:8002
 set INSIGHT_SERVICE_URL=http://127.0.0.1:8003
 set ENGAGEMENT_SERVICE_URL=http://127.0.0.1:8004
 set N8N_RESULT_WEBHOOK=http://localhost:5678/webhook/psysense-interview
-set N8N_INVITE_WEBHOOK=http://localhost:5678/webhook/candidate-invite
+set N8N_INVITE_WEBHOOK=https://hitan2004.app.n8n.cloud/webhook/candidate-invite
 set APP_BASE_URL=http://localhost:8501
 :: Do not set GROQ keys here. Keep them in .env to avoid blank env overrides.
 set DATABASE_URL=sqlite:///./psysense.db

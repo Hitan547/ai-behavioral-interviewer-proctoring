@@ -1,5 +1,6 @@
 venv310/
 data/
+hf_cache/
 *.wav
 *.mp3
 *.pyc

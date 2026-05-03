@@ -5,7 +5,7 @@ UI changes vs v3:
 - Camera panel styled like HireVue/Karat: dark "monitor" chrome, name plate,
   animated REC indicator, live metric chips inside the camera frame
 - Camera column uses dark #0d0d14 bg so video feels immersive / professional
-- Engagement/Presence/Emotion shown as styled chips INSIDE the camera panel
+- Engagement/Presence/Delivery shown as styled chips INSIDE the camera panel
 - Global design tokens via CSS :root variables — consistent everywhere
 - JetBrains Mono used for all numeric readouts (timers, metrics)
 - STOP button fully suppressed (CSS + JS)
@@ -19,6 +19,8 @@ import requests
 import time
 import threading as _threading
 import os
+import html
+import json
 import numpy as np
 from config import (
     ANSWER_SERVICE_URL, FUSION_SERVICE_URL,
@@ -26,12 +28,11 @@ from config import (
     N8N_RESULT_WEBHOOK
 )
 from audio_capture_robust import (
-    save_audio_frames_to_wav,
-    save_audio_input_to_wav,
+    save_webrtc_frames_to_wav as save_audio_frames_to_wav,
     transcribe_wav,
     get_webrtc_config_for_saas,
 )
-from database import init_db, verify_login, register_student, save_session, get_all_sessions, get_profile_by_username, update_interview_status
+from database import init_db, verify_login, register_student, save_session, get_all_sessions, update_interview_status
 from recruiter_dashboard import show_recruiter_dashboard
 from voice_question import speak_question
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, AudioProcessorBase, WebRtcMode
@@ -39,9 +40,6 @@ from engagement_realtime import EngagementDetector
 import av
 
 groq_key = os.getenv("GROQ_API_KEY_2") or os.getenv("GROQ_API_KEY")
-USE_AUDIO_INPUT_CAPTURE = os.getenv("PSYSENSE_USE_AUDIO_INPUT_CAPTURE", "0").strip().lower() in {
-    "1", "true", "yes", "on"
-}
 
 init_db()
 
@@ -320,9 +318,26 @@ st.markdown("""
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# ANTI-CHEATING PROCTORING — Client-Side (from proctoring_client module)
+# ══════════════════════════════════════════════════════════════════════════
+from proctoring_client import (
+    inject_proctoring_ui,
+    inject_proctoring_js,
+    render_proctoring_chips,
+    sync_proctoring_state_from_query_params,
+    build_proctoring_summary,
+)
+
+inject_proctoring_ui()   # CSS + HTML overlays
+inject_proctoring_js()   # JavaScript event listeners
+sync_proctoring_state_from_query_params()
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # HELPERS
 # ══════════════════════════════════════════════════════════════════════════
 STEPS = ["Setup", "Camera Check", "Interview", "Complete"]
+
 
 def render_stepper(active: int):
     parts = []
@@ -473,20 +488,33 @@ class AudioCaptureProcessor(AudioProcessorBase):
 
         if fmt == "s16":
             # Packed int16 often arrives as shape (1, channels*samples).
+            # CRITICAL: Detect actual channel count from frame.samples.
+            # e.g. shape=(1,1920) with samples=960 means 2ch stereo packed.
             if arr.ndim == 2 and arr.shape[0] == 1:
                 packed = arr.reshape(-1).astype(np.float32)
+
+                # Detect channel count from frame metadata
                 ch_count = 1
-                try:
-                    layout = getattr(frame, "layout", None)
-                    if layout is not None:
-                        ch_count = int(getattr(layout, "channels", 1) or 1)
-                except Exception:
-                    ch_count = 1
+                if isinstance(frame_samples, int) and frame_samples > 0:
+                    detected_ch = packed.size // frame_samples
+                    if detected_ch in (1, 2, 4, 6, 8):
+                        ch_count = detected_ch
+
+                # Fallback: try layout metadata
+                if ch_count == 1:
+                    try:
+                        layout = getattr(frame, "layout", None)
+                        if layout is not None:
+                            ch_count = int(getattr(layout, "channels", 1) or 1)
+                    except Exception:
+                        pass
 
                 if ch_count > 1 and packed.size >= ch_count:
                     usable = (packed.size // ch_count) * ch_count
                     if usable > 0:
                         packed = packed[:usable].reshape(-1, ch_count).mean(axis=1)
+                        if self._recv_count <= 5:
+                            print(f"[Audio] Deinterleaved {ch_count}ch -> mono ({len(packed)} samples)")
                 return _finalize(packed, scale=32768.0)
 
             mono = arr.mean(axis=0) if arr.ndim == 2 else arr.reshape(-1)
@@ -628,8 +656,7 @@ _D = {
     "audio_capture_started": False,
     "audio_capture_processor_id": None,
     "answer_input": "",
-    "audio_input_bytes": b"",
-    "audio_input_name": "",
+    "fullscreen_gate_shown": False,
     "cognitive_scores": [], "emotion_scores": [], "engagement_scores": [],
     "jd_id": None,
     "audio_frames": [],   # collects browser audio frames during recording 
@@ -639,9 +666,20 @@ _D = {
     "cur_engagement": None, "cur_absence": None,
     "cur_facial_emotion": {"dominant": "neutral", "breakdown": {}},
     "speech_breakdowns": [], "facial_emotions": [],
+    "resume_vocab": {},  # technical vocabulary extracted from resume for Whisper
+    "question_keywords": [],  # per-question keywords for accurate transcription
     "webrtc_reset_nonce": 0,
     "_last_webrtc_diag": None,
     "_last_webrtc_ctx_id": None,
+    # Anti-cheating proctoring
+    "proctoring_tab_switches": 0,
+    "proctoring_paste_attempts": 0,
+    "proctoring_fullscreen_exits": 0,
+    "proctoring_multi_face_total": 0,
+    "proctoring_screen_count": 1,
+    "proctoring_devtools_attempts": 0,
+    "proctoring_events": [],          # detailed event log
+    "proctoring_warning_level": "none",  # none/yellow/orange/red
 }
 for k, v in _D.items():
     if k not in st.session_state:
@@ -658,12 +696,82 @@ def _logout():
 
 def _new_interview():
     keep = {k: st.session_state[k] for k in
-            ["logged_in", "user_role", "auth_username", "auth_display_name"]}
+            ["logged_in", "user_role", "auth_username", "auth_display_name", "org_id", "user_email"]
+            if k in st.session_state}
     st.session_state.clear()
     for k, v in _D.items():
         st.session_state[k] = v
     st.session_state.update(keep)
     st.rerun()
+
+
+def _load_invited_candidate_context() -> bool:
+    """Load saved recruiter-provided resume/JD for invited candidates."""
+    if st.session_state.get("user_role") != "student":
+        return False
+    if st.session_state.get("invited_candidate_loaded") and st.session_state.get("invited_candidate"):
+        return bool(st.session_state.get("invited_candidate"))
+
+    st.session_state.invited_candidate_loaded = True
+    try:
+        from database import get_profile_for_candidate, get_job_posting_by_id
+
+        profile = get_profile_for_candidate(
+            st.session_state.auth_username,
+            st.session_state.get("user_email", ""),
+        )
+        if not profile or not (profile.resume_text or "").strip():
+            st.session_state.invited_candidate = False
+            return False
+
+        posting = get_job_posting_by_id(profile.jd_id) if profile.jd_id else None
+        st.session_state.invited_candidate = True
+        st.session_state.candidate_name = profile.name or st.session_state.auth_display_name
+        st.session_state.resume_text = profile.resume_text or ""
+        st.session_state.jd_id = profile.jd_id
+        st.session_state.jd_text = posting.jd_text if posting else ""
+        st.session_state.invited_job_title = posting.title if posting else "Interview"
+        st.session_state.invited_deadline = (
+            posting.deadline.strftime("%d %b %Y") if posting and posting.deadline else ""
+        )
+        st.session_state.invited_profile_id = profile.id
+        st.session_state.prepared_questions = _safe_json_loads(
+            getattr(profile, "questions_json", None), []
+        )
+        st.session_state.prepared_question_keywords = _safe_json_loads(
+            getattr(profile, "keywords_json", None), []
+        )
+        st.session_state.prepared_vocab = _safe_json_loads(
+            getattr(profile, "vocab_json", None), {}
+        )
+        return True
+    except Exception as e:
+        print(f"[candidate] Could not load invited context: {e}", flush=True)
+        st.session_state.invited_candidate = False
+        return False
+
+
+def _safe_json_loads(raw_value, fallback):
+    if not raw_value:
+        return fallback
+    try:
+        parsed = json.loads(raw_value)
+        return fallback if parsed is None else parsed
+    except Exception:
+        return fallback
+
+
+def _build_transcription_vocab_for_question(question_index: int) -> dict:
+    """Use per-question keywords first, then fall back to saved resume/JD vocab."""
+    q_keywords = st.session_state.get("question_keywords", []) or []
+    per_q_kw = q_keywords[question_index] if question_index < len(q_keywords) else []
+    if per_q_kw:
+        return {
+            "acronyms": per_q_kw,
+            "proper_nouns": [],
+            "terms": [],
+        }
+    return st.session_state.get("resume_vocab") or {}
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -771,10 +879,6 @@ if "media_stream_constraints" not in webrtc_config:
         },
     }
 
-if USE_AUDIO_INPUT_CAPTURE:
-    # Keep webcam for engagement tracking, but capture mic with st.audio_input.
-    webrtc_config["media_stream_constraints"]["audio"] = False
-
 webrtc_key = f"engagement-{st.session_state.webrtc_reset_nonce}"
 main_col, cam_col = st.columns([2.5, 1], gap="large")
 
@@ -821,18 +925,16 @@ with cam_col:
          border-right:1px solid var(--cam-border);">
     """, unsafe_allow_html=True)
 
-    webrtc_kwargs = {
-        "key": webrtc_key,
-        "mode": WebRtcMode.SENDRECV,
-        "video_processor_factory": EngagementProcessor,
-        "video_receiver_size": 32,
-        "async_processing": True,
-        "sendback_audio": not USE_AUDIO_INPUT_CAPTURE,
-    }
-    if not USE_AUDIO_INPUT_CAPTURE:
-        webrtc_kwargs["audio_processor_factory"] = AudioCaptureProcessor
-
-    ctx = webrtc_streamer(**webrtc_kwargs, **webrtc_config)
+    ctx = webrtc_streamer(
+        key=webrtc_key,
+        mode=WebRtcMode.SENDRECV,
+        video_processor_factory=EngagementProcessor,
+        audio_processor_factory=AudioCaptureProcessor,
+        video_receiver_size=32,
+        async_processing=True,
+        sendback_audio=True,
+        **webrtc_config,
+    )
 
     st.markdown("""
     <script>
@@ -896,7 +998,7 @@ with cam_col:
     video_ready = bool(ctx.video_processor is not None)
     audio_processor_ready = bool(ctx.audio_processor is not None)
     audio_track_ready = bool(getattr(ctx, "input_audio_track", None) is not None)
-    audio_ready = True if USE_AUDIO_INPUT_CAPTURE else bool(audio_processor_ready and audio_track_ready)
+    audio_ready = bool(audio_processor_ready and audio_track_ready)
     stream_ok = bool(playing and video_ready)
     stream_waiting = bool(playing and (not video_ready))
 
@@ -912,16 +1014,21 @@ with cam_col:
       </div>
     </div>
     """, unsafe_allow_html=True)
-    if USE_AUDIO_INPUT_CAPTURE:
-        st.caption(
-            f"WebRTC: playing={ctx.state.playing}, signalling={ctx.state.signalling}, "
-            "mic capture mode=st.audio_input"
-        )
-    else:
-        st.caption(
-            f"WebRTC: playing={ctx.state.playing}, signalling={ctx.state.signalling}, "
-            f"audio_proc={audio_processor_ready}, input_audio={audio_track_ready}, audio_ready={audio_ready}"
-        )
+
+    # ── Proctoring status chips (shown during active interview) ──
+    _interview_phases = ("prep", "recording", "processing", "transcript")
+    if phase in _interview_phases:
+        _tab_sw = st.session_state.get("proctoring_tab_switches", 0)
+        _tab_cls = "ps-chip-ok" if _tab_sw == 0 else ("ps-chip-warn" if _tab_sw <= 2 else "ps-chip-bad")
+        _mf = st.session_state.get("proctoring_multi_face_total", 0)
+        _mf_cls = "ps-chip-ok" if _mf == 0 else "ps-chip-bad"
+        st.markdown(f"""
+        <div class="ps-proctor-chips">
+          <span class="ps-proctor-chip {_tab_cls}">Tab: {_tab_sw}</span>
+          <span class="ps-proctor-chip {_mf_cls}">Faces: {_mf}</span>
+          <span class="ps-proctor-chip ps-chip-ok">Proctored</span>
+        </div>
+        """, unsafe_allow_html=True)
 
     if _hide_cam_ui:
         st.markdown("</div>", unsafe_allow_html=True)
@@ -935,6 +1042,75 @@ with cam_col:
 if phase == "start":
     with main_col:
         render_stepper(0)
+        invited_candidate = _load_invited_candidate_context()
+        if invited_candidate:
+            page_title(
+                f"Welcome, {st.session_state.auth_display_name}",
+                "Your recruiter has prepared this interview from your resume and the job description.",
+            )
+            deadline = st.session_state.get("invited_deadline", "")
+            deadline_html = f"<br><strong>Deadline:</strong> {html.escape(deadline)}" if deadline else ""
+            job_title = html.escape(st.session_state.get("invited_job_title", "Interview"))
+            st.markdown(f"""
+            <div class="ps-card" style="border-left:3px solid var(--indigo)">
+              <div style="font-size:10px;font-weight:700;color:var(--indigo);
+                   text-transform:uppercase;letter-spacing:0.8px;margin-bottom:8px">
+                Invited Interview</div>
+              <div style="font-size:18px;font-weight:700;color:var(--text);margin-bottom:6px">
+                {job_title}</div>
+              <div style="font-size:13px;color:var(--muted);line-height:1.7">
+                We will generate 5 personalized questions using the resume and JD already
+                submitted by the recruiter.{deadline_html}
+              </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Questions", "5")
+            m2.metric("Answer time", "60 sec each")
+            m3.metric("Estimated time", "8-10 min")
+
+            st.markdown("""
+            <div style="background:#e0f2fe;border:1px solid #7dd3fc;border-radius:12px;
+                 padding:14px 18px;margin-bottom:20px">
+              <div style="font-size:13px;color:#0c4a6e;line-height:1.6">
+                First, prepare the interview questions. Then you will complete a camera,
+                microphone, and fullscreen check before the interview starts.
+              </div>
+            </div>""", unsafe_allow_html=True)
+
+            _, cta, _ = st.columns([0.4, 1, 0.4])
+            with cta:
+                if st.button("Begin Setup", type="primary", use_container_width=True):
+                    prepared = st.session_state.get("prepared_questions") or []
+                    if len(prepared) >= 5:
+                        qs = prepared[:5]
+                        q_keywords = (st.session_state.get("prepared_question_keywords") or [])[:5]
+                        vocab = st.session_state.get("prepared_vocab") or {}
+                    else:
+                        with st.spinner("Preparing your personalized questions..."):
+                            from resume_parser import generate_questions_with_keywords
+                            qs, q_keywords, vocab = generate_questions_with_keywords(
+                                st.session_state.resume_text,
+                                jd_text=st.session_state.get("jd_text", ""),
+                            )
+                            try:
+                                from database import save_candidate_questions
+                                save_candidate_questions(
+                                    st.session_state.get("invited_profile_id"),
+                                    qs,
+                                    q_keywords,
+                                    vocab,
+                                )
+                            except Exception as e:
+                                print(f"[candidate] Could not save prepared questions: {e}", flush=True)
+                    st.session_state.questions = qs
+                    st.session_state.resume_vocab = vocab
+                    st.session_state.question_keywords = q_keywords
+                    st.success(f"✓ {len(qs)} questions ready")
+                    time.sleep(0.8)
+                    go_to("camera_setup")
+            st.stop()
         page_title(f"Welcome, {st.session_state.auth_display_name} 👋",
                    "Upload your resume to get 5 personalised interview questions.")
 
@@ -1028,13 +1204,15 @@ if phase == "start":
                     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as t:
                         t.write(resume_file.read()); tp = t.name
                     with st.spinner("Reading resume and crafting personalised questions…"):
-                        from resume_parser import extract_resume_text, generate_questions
+                        from resume_parser import extract_resume_text, generate_questions_with_keywords
                         rt = extract_resume_text(tp)
-                        qs = generate_questions(rt, jd_text=final_jd)
+                        qs, q_keywords, vocab = generate_questions_with_keywords(rt, jd_text=final_jd)
                     try: os.unlink(tp)
                     except: pass
-                    st.session_state.questions   = qs
-                    st.session_state.resume_text = rt
+                    st.session_state.questions    = qs
+                    st.session_state.resume_text  = rt
+                    st.session_state.resume_vocab = vocab
+                    st.session_state.question_keywords = q_keywords
                     st.success(f"✓ {len(qs)} questions ready ({'resume + JD' if final_jd else 'resume only'})")
                     time.sleep(0.8)
                     go_to("camera_setup")
@@ -1055,7 +1233,7 @@ elif phase == "report":
                 json={"cognitive_score": avg_cog, "emotion_score": avg_emo,
                       "engagement_score": avg_eng}, timeout=10).json()
         except:
-            fr = {"final_behavioral_score": round((0.5*avg_cog + 0.3*avg_emo + 0.2*avg_eng)*10, 1)}
+            fr = {"final_behavioral_score": round((0.70*avg_cog + 0.15*avg_emo + 0.15*avg_eng)*10, 1)}
 
         try:
             ir = requests.post(f"{INSIGHT_SERVICE_URL}/generate_insight",
@@ -1088,7 +1266,8 @@ elif phase == "report":
                 engagement_score=avg_eng, questions_answered=len(st.session_state.question_history),
                 insight_data=ir, per_question_data=pq, jd_used=bool(st.session_state.get("jd_text")),
                 recruiter_verdicts=st.session_state.recruiter_verdicts,
-                jd_id=st.session_state.get("jd_id"))
+                jd_id=st.session_state.get("jd_id"),
+                proctoring_data=build_proctoring_summary())
             st.session_state.session_saved    = True
             st.session_state.saved_session_id = sid
             if st.session_state.get("org_id"):
@@ -1117,6 +1296,7 @@ elif phase == "report":
                             "final_score":       final_score,
                             "cognitive_score":   round(avg_cog, 1),
                             "emotion_score":     round(avg_emo, 1),
+                            "delivery_score":    round(avg_emo, 1),
                             "engagement_score":  round(avg_eng, 1),
                             "questions_answered": len(st.session_state.question_history),
                             "flagged":           final_score < 50,
@@ -1177,13 +1357,26 @@ elif phase == "report":
         </div>
         """, unsafe_allow_html=True)
         st.markdown("<hr>", unsafe_allow_html=True)
-        c1, c2 = st.columns(2, gap="medium")
-        with c1:
-            st.markdown('<div style="margin-bottom:8px"><div style="font-size:14px;font-weight:600;color:var(--text)">Practice again?</div><div style="font-size:12px;color:var(--muted);margin-top:2px">Start fresh with a different resume or JD.</div></div>', unsafe_allow_html=True)
-            if st.button("Start New Interview", use_container_width=True): _new_interview()
-        with c2:
-            st.markdown('<div style="margin-bottom:8px"><div style="font-size:14px;font-weight:600;color:var(--text)">All done?</div><div style="font-size:12px;color:var(--muted);margin-top:2px">Your results are saved. Safe to log out.</div></div>', unsafe_allow_html=True)
-            if st.button("Logout →", type="primary", use_container_width=True, key="rep_logout"): _logout()
+        if st.session_state.get("invited_candidate"):
+            _, done_col, _ = st.columns([0.5, 1, 0.5])
+            with done_col:
+                st.markdown(
+                    '<div style="text-align:center;margin-bottom:10px">'
+                    '<div style="font-size:14px;font-weight:600;color:var(--text)">All done</div>'
+                    '<div style="font-size:12px;color:var(--muted);margin-top:2px">'
+                    'Your interview has been submitted. You may safely log out.</div></div>',
+                    unsafe_allow_html=True,
+                )
+                if st.button("Logout ->", type="primary", use_container_width=True, key="rep_logout"):
+                    _logout()
+        else:
+            c1, c2 = st.columns(2, gap="medium")
+            with c1:
+                st.markdown('<div style="margin-bottom:8px"><div style="font-size:14px;font-weight:600;color:var(--text)">Practice again?</div><div style="font-size:12px;color:var(--muted);margin-top:2px">Start fresh with a different resume or JD.</div></div>', unsafe_allow_html=True)
+                if st.button("Start New Interview", use_container_width=True): _new_interview()
+            with c2:
+                st.markdown('<div style="margin-bottom:8px"><div style="font-size:14px;font-weight:600;color:var(--text)">All done?</div><div style="font-size:12px;color:var(--muted);margin-top:2px">Your results are saved. Safe to log out.</div></div>', unsafe_allow_html=True)
+                if st.button("Logout ->", type="primary", use_container_width=True, key="rep_logout"): _logout()
 
 
 # ── ALL CAMERA PHASES ─────────────────────────────────────────────────────
@@ -1195,24 +1388,16 @@ else:
             render_stepper(1)
             page_title("Camera Check", "Allow camera access — make sure you're well lit and centred.")
             st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
-            if USE_AUDIO_INPUT_CAPTURE:
-                st.info(
-                    "Click START in the camera panel to enable video. "
-                    "You will record each answer with the in-page microphone recorder."
-                )
-            else:
-                st.info(
-                    "Click START in the camera panel and allow microphone access. "
-                    "Your default system microphone is auto-detected."
-                )
+            st.info(
+                "Click START in the camera panel and allow microphone access. "
+                "Your default system microphone is auto-detected."
+            )
 
             if stream_ok:
                 c1, c2, c3 = st.columns(3)
                 c1.success("✓ Camera on")
                 c2.success("✓ Face detected")
-                if USE_AUDIO_INPUT_CAPTURE:
-                    c3.success("✓ In-page mic recorder enabled")
-                elif audio_ready:
+                if audio_ready:
                     c3.success("✓ Mic stream ready")
                 else:
                     c3.warning("⚠ Mic not ready")
@@ -1225,8 +1410,13 @@ else:
 
                 if not st.session_state.get("camera_ready_confirmed"):
                     st.session_state.camera_ready_confirmed = True
+                if not st.session_state.get("fullscreen_gate_shown"):
+                    from proctoring_client import inject_fullscreen_gate
+                    inject_fullscreen_gate()
+                    st.session_state.fullscreen_gate_shown = True
 
-                if (not USE_AUDIO_INPUT_CAPTURE) and (not audio_ready):
+
+                if not audio_ready:
                     st.warning("Microphone stream is not ready yet. Click STOP, then START again and allow microphone access before starting the interview.")
                 elif st.button("▶  Start Interview", type="primary", use_container_width=True, key="cam_proceed"):
                     if st.session_state.get("jd_id"):
@@ -1235,20 +1425,27 @@ else:
                             st.session_state.jd_id,
                             "In Progress"
                         )
+                    st.components.v1.html("""
+                    <script>
+                        if (window.parent.__psEnterFullscreen) window.parent.__psEnterFullscreen();
+                        if (window.parent.__psActivateProctoring) window.parent.__psActivateProctoring();
+                    </script>
+                    """, height=0)
                     go_to("prep")
             else:
                 if stream_waiting:
-                    st.warning("Camera permission granted but video processor is not ready yet. Click STOP, then START again.")
-                st.info("If you see 'Requested device not found', click SELECT DEVICE in the camera panel and choose your webcam.")
-                if st.button("⚠️ Force Reset Camera (only if camera is stuck)", key="reset_webrtc_devices"):
-                    st.warning("Camera will restart. You may see an AbortError. Wait 3 seconds and click START again.")
-                    st.session_state.webrtc_reset_nonce += 1
-                    st.session_state.audio_capture_started = False
-                    st.session_state.audio_capture_processor_id = None
-                    st.session_state._last_webrtc_diag = None
-                    st.session_state._last_webrtc_ctx_id = None
-                    time.sleep(2)
-                    st.rerun()
+                    st.warning("Camera permission was granted, but the video is still starting. Please wait a moment, or restart the camera if it stays stuck.")
+                with st.expander("Camera or microphone not working?"):
+                    st.info("If no camera appears, click SELECT DEVICE in the camera panel and choose your webcam.")
+                    if st.button("Reset camera", key="reset_webrtc_devices"):
+                        st.warning("Camera will restart. Wait a few seconds, then click START again.")
+                        st.session_state.webrtc_reset_nonce += 1
+                        st.session_state.audio_capture_started = False
+                        st.session_state.audio_capture_processor_id = None
+                        st.session_state._last_webrtc_diag = None
+                        st.session_state._last_webrtc_ctx_id = None
+                        time.sleep(2)
+                        st.rerun()
                 st.markdown("""
                 <div class="ps-card">
                   <div style="font-size:15px;font-weight:600;color:var(--text);margin-bottom:8px">
@@ -1272,9 +1469,6 @@ else:
                           <div style="font-size:13px;font-weight:600;color:var(--text)">{title}</div>
                           <div style="font-size:11px;color:var(--muted);margin-top:4px;line-height:1.5">{tip}</div>
                         </div>""", unsafe_allow_html=True)
-                st.caption(
-                    f"WebRTC state: playing={ctx.state.playing}, signalling={ctx.state.signalling}, audio_ready={audio_ready}"
-                )
 
         # ── PREP ──────────────────────────────────────────────────────
         elif phase == "prep":
@@ -1338,14 +1532,12 @@ else:
                 st.session_state.record_container = {
                     "text": "", "done": False, "wav_path": None, "duration": 60, "error": None}
                 st.session_state.audio_frames = []
-                st.session_state.audio_input_bytes = b""
-                st.session_state.audio_input_name = ""
                 st.session_state.audio_capture_debug = ""
                 st.session_state.audio_capture_started = False
                 st.session_state.audio_capture_processor_id = None
 
                 # Prime audio capture before entering recording to reduce first-tick races.
-                if (not USE_AUDIO_INPUT_CAPTURE) and stream_ok and ctx.audio_processor:
+                if stream_ok and ctx.audio_processor:
                     try:
                         ctx.audio_processor.drain()
                         # Let local TTS/speaker bleed settle before arming capture.
@@ -1379,7 +1571,6 @@ else:
             print(f"  ctx.audio_processor={ctx.audio_processor}")
             print(f"  audio_processor_id={id(ctx.audio_processor) if ctx.audio_processor else None}")
             print(f"  audio_capture_started={st.session_state.get('audio_capture_started', 'NOT SET')}")
-            print(f"  use_audio_input_capture={USE_AUDIO_INPUT_CAPTURE}")
             print(f"[RECORDING PHASE] playing={ctx.state.playing}, signalling={ctx.state.signalling}")
 
             if st.session_state.get("record_start") is None:
@@ -1405,8 +1596,6 @@ else:
 
             # Start/restart capture when not armed (for first render and processor swaps).
             if (
-                not USE_AUDIO_INPUT_CAPTURE
-                and
                 stream_ok
                 and ctx.audio_processor
                 and not st.session_state.get("audio_capture_started", False)
@@ -1450,7 +1639,7 @@ else:
             if stream_ok and ctx.video_processor:
                 ctx.video_processor.set_countdown(None)
 
-            if (not USE_AUDIO_INPUT_CAPTURE) and stream_ok and (not ctx.audio_processor):
+            if stream_ok and not ctx.audio_processor:
                 st.error(
                     "🎤 Microphone stream not ready\n\n"
                     "Click STOP in the camera panel, then START again. "
@@ -1462,7 +1651,7 @@ else:
                 )
 
             # Continuously drain buffered frames while recording timer is active.
-            if (not USE_AUDIO_INPUT_CAPTURE) and stream_ok and ctx.audio_processor and st.session_state.get("audio_capture_started") and remaining > 0:
+            if stream_ok and ctx.audio_processor and st.session_state.get("audio_capture_started") and remaining > 0:
                 try:
                     tick_frames = ctx.audio_processor.pop_frames()
                     if tick_frames:
@@ -1497,39 +1686,6 @@ else:
                         <strong>A</strong>ction · <strong>R</strong>esult
                       </div>
                     </div>""", unsafe_allow_html=True)
-
-                    if USE_AUDIO_INPUT_CAPTURE:
-                        audio_input_key = (
-                            f"audio_input_q{st.session_state.q_index}_"
-                            f"retry{int(st.session_state.retry_used)}"
-                        )
-                        clip = st.audio_input(
-                            "Record your answer and click stop when finished",
-                            key=audio_input_key,
-                        )
-                        if clip is not None:
-                            try:
-                                clip_bytes = clip.getvalue()
-                            except Exception:
-                                clip_bytes = b""
-                            if clip_bytes:
-                                st.session_state.audio_input_bytes = clip_bytes
-                                st.session_state.audio_input_name = (
-                                    getattr(clip, "name", "") or "audio_input"
-                                )
-                                st.session_state.audio_capture_debug = (
-                                    f"Recorded clip size: {len(clip_bytes)} bytes."
-                                )
-
-                        if st.session_state.get("audio_input_bytes"):
-                            if st.button(
-                                "Finish Recording Now",
-                                key=f"finish_audio_now_{audio_input_key}",
-                                use_container_width=True,
-                            ):
-                                st.session_state.record_start = time.time() - RECORD_TIME
-                                st.rerun()
-
                 st.progress((RECORD_TIME - remaining) / RECORD_TIME)
                 if st.session_state.get("audio_capture_debug"):
                     st.caption(st.session_state.audio_capture_debug)
@@ -1539,8 +1695,9 @@ else:
                 st.rerun()
             else:
                 if stream_ok and ctx.video_processor:
-                    score, absent, fem = ctx.video_processor.snapshot_and_reset()
+                    score, absent, fem, multi_face = ctx.video_processor.snapshot_and_reset()
                     if score == 0.0: score = 5.0
+                    st.session_state.proctoring_multi_face_total += multi_face
                 else:
                     score, absent, fem = 5.0, 0.0, {"dominant": "neutral", "breakdown": {}}
                 st.session_state.cur_engagement     = score
@@ -1548,7 +1705,7 @@ else:
                 st.session_state.cur_facial_emotion = fem
 
                 frames = list(st.session_state.get("audio_frames", []))
-                if (not USE_AUDIO_INPUT_CAPTURE) and stream_ok and ctx.audio_processor:
+                if stream_ok and ctx.audio_processor:
                     try:
                         tail_frames = ctx.audio_processor.stop_and_get()
                         if tail_frames:
@@ -1561,109 +1718,66 @@ else:
                 st.session_state.audio_capture_processor_id = None
 
                 # Save browser audio frames to WAV, then transcribe
-                if USE_AUDIO_INPUT_CAPTURE:
-                    clip_bytes = st.session_state.get("audio_input_bytes", b"")
-                    clip_name = st.session_state.get("audio_input_name", "audio_input")
-                    print(f"[RECORDING→PROCESSING] audio_input bytes={len(clip_bytes)}")
-
-                    if clip_bytes:
-                        st.session_state.record_container["error"] = None
-                        wav_path = save_audio_input_to_wav(clip_bytes, source_hint=clip_name)
-
-                        if wav_path:
-                            print(f"[RECORDING→PROCESSING] WAV file created: {wav_path}")
-                            transcribe_wav(
-                                wav_path,
-                                st.session_state.record_container,
-                                RECORD_TIME,
-                                prompt=(
-                                    "Verbatim transcription of spoken interview answer in English. "
-                                    "Do not paraphrase, summarize, or infer from context. "
-                                    "Preserve exact words, fillers, repetitions, and false starts. "
-                                    "If any word is unclear, output [inaudible]."
-                                ),
-                            )
-                        else:
-                            print("[RECORDING→PROCESSING] WAV creation failed from audio_input")
-                            st.session_state.record_container.update({
-                                "text": "",
-                                "wav_path": None,
-                                "duration": RECORD_TIME,
-                                "done": True,
-                                "error": "Failed to decode recorded audio. Please record again."
-                            })
-                    else:
-                        print("[RECORDING→PROCESSING] No audio_input bytes captured")
-                        st.session_state.audio_capture_debug = (
-                            "No recorded clip found. Use the in-page microphone recorder and try again."
+                frames = st.session_state.get("audio_frames", [])
+                print(f"[RECORDING→PROCESSING] Collected {len(frames)} audio frames")
+                
+                if frames:
+                    st.session_state.audio_capture_debug = (
+                        f"Captured {len(frames)} audio chunks for transcription."
+                    )
+                    st.session_state.record_container["error"] = None
+                    detected_sr = (
+                        int(getattr(ctx.audio_processor, "sample_rate", 48000))
+                        if ctx.audio_processor else 48000
+                    )
+                    wav_path = save_audio_frames_to_wav(frames, sample_rate=detected_sr)
+                    
+                    if wav_path:
+                        print(f"[RECORDING→PROCESSING] WAV file created: {wav_path}")
+                        # Pass per-question keywords into container so
+                        # build_keyword_prompt() uses ONLY terms relevant to
+                        # THIS question — prevents Whisper hallucination.
+                        q_idx = st.session_state.q_index
+                        st.session_state.record_container["question"] = q
+                        st.session_state.record_container["vocab"] = (
+                            _build_transcription_vocab_for_question(q_idx)
                         )
+                        transcribe_wav(
+                            wav_path,
+                            st.session_state.record_container,
+                            RECORD_TIME,
+                            prompt="",  # let build_keyword_prompt() handle it
+                        )
+                    else:
+                        print("[RECORDING→PROCESSING] WAV creation failed")
                         st.session_state.record_container.update({
                             "text": "",
                             "wav_path": None,
                             "duration": RECORD_TIME,
                             "done": True,
-                            "error": "No recorded audio found. Please record your answer and try again."
+                            "error": "Failed to process audio. Please check microphone and try again."
                         })
                 else:
-                    frames = st.session_state.get("audio_frames", [])
-                    print(f"[RECORDING→PROCESSING] Collected {len(frames)} audio frames")
-
-                    if frames:
-                        st.session_state.audio_capture_debug = (
-                            f"Captured {len(frames)} audio chunks for transcription."
-                        )
-                        st.session_state.record_container["error"] = None
-                        detected_sr = (
-                            int(getattr(ctx.audio_processor, "sample_rate", 48000))
-                            if ctx.audio_processor else 48000
-                        )
-                        wav_path = save_audio_frames_to_wav(frames, sample_rate=detected_sr)
-
-                        if wav_path:
-                            print(f"[RECORDING→PROCESSING] WAV file created: {wav_path}")
-                            transcribe_wav(
-                                wav_path,
-                                st.session_state.record_container,
-                                RECORD_TIME,
-                                prompt=(
-                                    "Verbatim transcription of spoken interview answer in English. "
-                                    "Do not paraphrase, summarize, or infer from context. "
-                                    "Preserve exact words, fillers, repetitions, and false starts. "
-                                    "If any word is unclear, output [inaudible]."
-                                ),
-                            )
-                        else:
-                            print("[RECORDING→PROCESSING] WAV creation failed")
-                            st.session_state.record_container.update({
-                                "text": "",
-                                "wav_path": None,
-                                "duration": RECORD_TIME,
-                                "done": True,
-                                "error": "Failed to process audio. Please check microphone and try again."
-                            })
-                    else:
-                        # No captured browser audio: finish immediately so UI does not
-                        # stall in processing for another full recording window.
-                        print("[RECORDING→PROCESSING] No audio frames captured!")
-                        st.session_state.audio_capture_debug = (
-                            "No audio was captured from your microphone.\n\n"
-                            "Possible causes:\n"
-                            "• Microphone permission not granted\n"
-                            "• Wrong microphone selected\n"
-                            "• Microphone muted in Windows\n\n"
-                            "Please return to Camera Check and ensure microphone access is allowed."
-                        )
-                        st.session_state.record_container.update({
-                            "text": "",
-                            "wav_path": None,
-                            "duration": RECORD_TIME,
-                            "done": True,
-                            "error": "No audio captured. Please check microphone permissions and try again."
-                        })
+                    # No captured browser audio: finish immediately so UI does not
+                    # stall in processing for another full recording window.
+                    print("[RECORDING→PROCESSING] No audio frames captured!")
+                    st.session_state.audio_capture_debug = (
+                        "No audio was captured from your microphone.\n\n"
+                        "Possible causes:\n"
+                        "• Microphone permission not granted\n"
+                        "• Wrong microphone selected\n"
+                        "• Microphone muted in Windows\n\n"
+                        "Please return to Camera Check and ensure microphone access is allowed."
+                    )
+                    st.session_state.record_container.update({
+                        "text": "",
+                        "wav_path": None,
+                        "duration": RECORD_TIME,
+                        "done": True,
+                        "error": "No audio captured. Please check microphone permissions and try again."
+                    })
 
                 st.session_state.audio_frames = []  # clear for next question
-                st.session_state.audio_input_bytes = b""
-                st.session_state.audio_input_name = ""
                 go_to("processing")
 
         # ── PROCESSING ────────────────────────────────────────────────
@@ -1761,8 +1875,6 @@ else:
                         st.session_state.record_container = {
                             "text": "", "done": False, "wav_path": None, "duration": 60, "error": None}
                         st.session_state.audio_frames     = []  # clear old frames
-                        st.session_state.audio_input_bytes = b""
-                        st.session_state.audio_input_name = ""
                         st.session_state.record_start     = time.time()
                         if stream_ok and ctx.video_processor:
                             ctx.video_processor.snapshot_and_reset()
@@ -1826,8 +1938,6 @@ else:
                     st.session_state.audio_capture_started = False
                     st.session_state.audio_capture_processor_id = None
                     st.session_state.audio_frames = []
-                    st.session_state.audio_input_bytes = b""
-                    st.session_state.audio_input_name = ""
 
                     if st.session_state.q_index >= len(QUESTIONS):
                         go_to("report")

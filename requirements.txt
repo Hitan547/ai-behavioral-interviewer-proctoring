@@ -15,10 +15,10 @@ typing_extensions==4.15.0
 
 # ML / AI
 torch
+torchaudio
 transformers==5.3.0
 accelerate==1.13.0
-groq==0.4.1
-openai-whisper==20250625
+groq>=0.8.0
 
 # Audio / Video
 sounddevice==0.5.5
@@ -30,6 +30,7 @@ opencv-python
 numpy==1.26.4
 scikit-learn==1.7.2
 pandas==2.3.3
+psycopg2-binary==2.9.11
 
 # PDF / Resume
 fpdf2==2.8.7

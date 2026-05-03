@@ -38,9 +38,15 @@ def home():
     return {"status": "Engagement Service Running", "port": 8004}
 
 
+@app.get("/health")
+def health():
+    return {"status": "ok", "service": "engagement_service", "version": "1.0"}
+
+
 @app.get("/detect")
 def detect_get():
-    """Default 10-second webcam sample."""
+    if os.getenv("ENVIRONMENT") == "production":
+        return {"error": "Not available in production. Interview uses WebRTC."}
     score = compute_engagement_score(duration=10)
     return {"engagement_score": score}
 
@@ -48,5 +54,7 @@ def detect_get():
 @app.post("/detect")
 def detect_post(req: DetectRequest):
     """Custom-duration webcam sample."""
+    if os.getenv("ENVIRONMENT") == "production":
+        return {"error": "Not available in production. Interview uses WebRTC."}
     score = compute_engagement_score(duration=req.duration)
     return {"engagement_score": score}

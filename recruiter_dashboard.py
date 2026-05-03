@@ -16,8 +16,12 @@ from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable,
 )
 from database import (
-    get_all_sessions, get_session_by_id,
-    update_candidate_status, save_recruiter_notes, get_all_users
+    get_session_by_id, get_session_by_id_for_org, get_sessions_by_org,
+    update_candidate_status, save_recruiter_notes,
+    get_job_postings_by_org,
+    get_jd_stats,
+    get_candidates_by_jd,
+    check_expired_invites,
 )
 
 # ─────────────────────────────────────────────
@@ -87,11 +91,48 @@ def _status_index(value):
         return 0
 
 
+def _current_org_id():
+    return st.session_state.get("org_id")
+
+
+def _decision_for_session(s):
+    score = s.final_score or 0
+    verdict = _verdict_from_score(s.cognitive_score or 5.0)
+    risk = getattr(s, "proctoring_risk", "Low") or "Low"
+    if verdict in ("Strong Advance", "Advance") and score >= 55 and risk in ("Low", "Medium"):
+        return "Advance", "vb-green"
+    if verdict == "Do Not Advance" or score < 45 or risk in ("High", "Critical"):
+        return "Reject", "vb-red"
+    return "Hold", "vb-yellow"
+
+
+def _invitation_bucket(status: str) -> str:
+    status = status or "Shortlisted"
+    if status == "Expired":
+        return "Expired"
+    if status == "In Progress":
+        return "Started"
+    if status in ("Completed", "Passed", "Below Threshold"):
+        return "Completed"
+    if status in ("Invited", "Shortlisted"):
+        return "Invited"
+    return status
+
+
+def _invitation_badge_class(bucket: str) -> str:
+    return {
+        "Invited": "vb-blue",
+        "Started": "vb-yellow",
+        "Completed": "vb-green",
+        "Expired": "vb-red",
+    }.get(bucket, "vb-yellow")
+
+
 # ─────────────────────────────────────────────
 # PDF
 # ─────────────────────────────────────────────
-def generate_candidate_pdf(session_id: int) -> bytes:
-    s = get_session_by_id(session_id)
+def generate_candidate_pdf(session_id: int, org_id: str = None) -> bytes:
+    s = get_session_by_id_for_org(session_id, org_id) if org_id else get_session_by_id(session_id)
     if not s:
         return b""
 
@@ -152,7 +193,7 @@ def generate_candidate_pdf(session_id: int) -> bytes:
         [["Dimension", "Score", "Level"],
          ["Answer Quality", f"{round(s.cognitive_score or 5,1)}/10",
           _score_label(s.cognitive_score or 5)],
-         ["Emotional Tone", f"{round(s.emotion_score or 5,1)}/10",
+         ["Delivery Signal", f"{round(s.emotion_score or 5,1)}/10",
           _score_label(s.emotion_score or 5)],
          ["Attentiveness",  f"{round(s.engagement_score or 5,1)}/10",
           _score_label(s.engagement_score or 5)],
@@ -196,7 +237,7 @@ def generate_candidate_pdf(session_id: int) -> bytes:
                 Paragraph(qd.get("answer") or "No answer recorded.", ans_s),
             ]
             qt = Table(
-                [["Answer Quality", "Emotional Tone", "Attentiveness", "Face Visible"],
+                [["Answer Quality", "Delivery Signal", "Attentiveness", "Face Visible"],
                  [f"{round(qd.get('cognitive',5),1)}/10",
                   f"{round(qd.get('emotion',5),1)}/10",
                   f"{round(qd.get('engagement',5),1)}/10",
@@ -214,8 +255,41 @@ def generate_candidate_pdf(session_id: int) -> bytes:
             ]))
             story += [qt, sp(6), hr()]
 
+    # ── Proctoring / Anti-Cheating section ──
+    proctor = _safe_json_loads(getattr(s, 'proctoring_json', None), {})
+    if proctor:
+        story += [hr(), Paragraph("Anti-Cheating Proctoring", h1_s)]
+        risk = proctor.get("risk_level", "Low")
+        risk_color = {"Low": C["primary"], "Medium": C["accent"], "High": C["danger"]}.get(risk, C["muted"])
+        story.append(Paragraph(
+            f'<font color="{risk_color}"><b>Risk Level: {risk}</b></font>', body_s))
+        # Summary stats
+        pt = Table(
+            [["Tab Switches", "Paste Attempts", "Fullscreen Exits", "Multi-Face", "Screens"],
+             [str(proctor.get("tab_switch_count", 0)),
+              str(proctor.get("paste_attempt_count", 0)),
+              str(proctor.get("fullscreen_exit_count", 0)),
+              str(proctor.get("multi_face_count", 0)),
+              str(proctor.get("screen_count", 1))]],
+            colWidths=[34*mm]*5)
+        pt.setStyle(TableStyle([
+            ("BACKGROUND",    (0,0),(-1,0), colors.HexColor("#7c3aed")),
+            ("TEXTCOLOR",     (0,0),(-1,0), colors.white),
+            ("FONTNAME",      (0,0),(-1,0), "Helvetica-Bold"),
+            ("FONTSIZE",      (0,0),(-1,-1), 8),
+            ("ALIGN",         (0,0),(-1,-1), "CENTER"),
+            ("GRID",          (0,0),(-1,-1), 0.3, colors.HexColor(C["border"])),
+            ("TOPPADDING",    (0,0),(-1,-1), 4),
+            ("BOTTOMPADDING", (0,0),(-1,-1), 4),
+        ]))
+        story += [pt, sp(4)]
+        # Flags
+        for flag in proctor.get("flags", []):
+            story.append(Paragraph(f"<b>!</b> {flag}", body_s))
+        story.append(sp(10))
+
     story.append(Paragraph(
-        "PsySense AI — For internal recruiter use only. Confidential.", cap_s))
+        "PsySense AI -- For internal recruiter use only. Confidential.", cap_s))
     doc.build(story)
     return buf.getvalue()
 
@@ -223,7 +297,7 @@ def generate_candidate_pdf(session_id: int) -> bytes:
 # ─────────────────────────────────────────────
 # MAIN DASHBOARD
 # ─────────────────────────────────────────────
-RECRUITER_NAV_OPTIONS = ["📋 Candidates", "💼 Jobs", "👥 Students", "📈 Analytics"]
+RECRUITER_NAV_OPTIONS = ["📋 Candidates", "💼 Jobs", "📈 Analytics"]
 
 
 def _recruiter_logout():
@@ -325,6 +399,45 @@ def show_recruiter_dashboard():
     [data-testid="stMain"] [data-baseweb="select"] span {
       color: #111827 !important;
     }
+    [data-testid="stMain"] label,
+    [data-testid="stMain"] small,
+    [data-testid="stMain"] [data-testid="stWidgetLabel"],
+    [data-testid="stMain"] [data-testid="stWidgetLabel"] p,
+    [data-testid="stMain"] [data-testid="stCaption"] *,
+    [data-testid="stMain"] div[data-testid="stMarkdownContainer"] li {
+      color: #374151 !important;
+    }
+    [data-testid="stMain"] input,
+    [data-testid="stMain"] textarea,
+    [data-testid="stMain"] [contenteditable="true"] {
+      color: #111827 !important;
+      -webkit-text-fill-color: #111827 !important;
+      background-color: #ffffff !important;
+    }
+    [data-testid="stMain"] [data-baseweb="select"] div,
+    [data-testid="stMain"] [data-baseweb="select"] input {
+      color: #111827 !important;
+      -webkit-text-fill-color: #111827 !important;
+    }
+    [data-testid="stMain"] [data-testid="stExpander"] details {
+      background: #ffffff !important;
+      border: 1px solid #E0E4E8 !important;
+      border-radius: 10px !important;
+    }
+    [data-testid="stMain"] [data-testid="stExpander"] summary,
+    [data-testid="stMain"] [data-testid="stExpander"] summary *,
+    [data-testid="stMain"] [data-testid="stExpander"] [data-testid="stMarkdownContainer"],
+    [data-testid="stMain"] [data-testid="stExpander"] [data-testid="stMarkdownContainer"] * {
+      color: #111827 !important;
+    }
+    [data-testid="stMain"] code {
+      color: #111827 !important;
+      background: #f1f5f9 !important;
+      border-radius: 6px !important;
+    }
+    [data-testid="stMain"] a {
+      color: #2563eb !important;
+    }
     [data-testid="stMain"] h1,
     [data-testid="stMain"] h2,
     [data-testid="stMain"] h3 {
@@ -346,6 +459,20 @@ def show_recruiter_dashboard():
       color: #ffffff !important;
       -webkit-text-fill-color: #ffffff !important;
     }
+    [data-testid="stMain"] .stButton > button:not([kind="primary"]),
+    [data-testid="stMain"] [data-testid="stDownloadButton"] > button,
+    [data-testid="stMain"] .stFormSubmitButton > button:not([kind="primary"]) {
+      color: #111827 !important;
+      -webkit-text-fill-color: #111827 !important;
+      background: #ffffff !important;
+      border: 1px solid #cbd5e1 !important;
+    }
+    [data-testid="stMain"] .stButton > button:not([kind="primary"]) *,
+    [data-testid="stMain"] [data-testid="stDownloadButton"] > button *,
+    [data-testid="stMain"] .stFormSubmitButton > button:not([kind="primary"]) * {
+      color: #111827 !important;
+      -webkit-text-fill-color: #111827 !important;
+    }
     /* st.tabs (Job Postings) */
     [data-testid="stMain"] [data-baseweb="tab"] {
       color: #4b5563 !important;
@@ -359,8 +486,105 @@ def show_recruiter_dashboard():
         background: linear-gradient(120deg, #185FA5 0%, #1D9E75 100%);
         padding: 14px 24px; border-radius: 12px; margin-bottom: 16px;
     }
-    .ps-topbar h2 { color: #fff !important; margin: 0; font-size: 20px; }
-    .ps-topbar p  { color: rgba(255,255,255,0.8) !important; margin: 2px 0 0; font-size: 12px; }
+    .ps-topbar,
+    .ps-topbar *,
+    .ps-topbar h2,
+    .ps-topbar p {
+        color: #ffffff !important;
+        -webkit-text-fill-color: #ffffff !important;
+    }
+    .ps-topbar h2 { margin: 0; font-size: 20px; }
+    .ps-topbar p  { margin: 2px 0 0; font-size: 12px; opacity: .86; }
+
+    /* Make Streamlit controls readable on the light dashboard surface. */
+    [data-testid="stMain"] [data-baseweb="select"] > div,
+    [data-testid="stMain"] [data-baseweb="select"] div[role="combobox"],
+    [data-testid="stSidebar"] [data-baseweb="select"] > div,
+    [data-testid="stSidebar"] [data-baseweb="select"] div[role="combobox"] {
+        background: #ffffff !important;
+        border-color: #cbd5e1 !important;
+        color: #111827 !important;
+        -webkit-text-fill-color: #111827 !important;
+        box-shadow: none !important;
+    }
+    [data-testid="stMain"] [data-baseweb="select"] *,
+    [data-testid="stSidebar"] [data-baseweb="select"] * {
+        color: #111827 !important;
+        -webkit-text-fill-color: #111827 !important;
+    }
+    [data-testid="stMain"] [data-baseweb="select"] svg,
+    [data-testid="stSidebar"] [data-baseweb="select"] svg {
+        fill: #111827 !important;
+        color: #111827 !important;
+    }
+    [data-baseweb="popover"],
+    [data-baseweb="menu"],
+    [role="listbox"] {
+        background: #ffffff !important;
+        background-color: #ffffff !important;
+        color: #111827 !important;
+    }
+    [data-baseweb="popover"] *,
+    [data-baseweb="menu"] *,
+    [role="listbox"] * {
+        color: #111827 !important;
+        -webkit-text-fill-color: #111827 !important;
+    }
+    [data-baseweb="popover"] ul,
+    [data-baseweb="popover"] li,
+    [data-baseweb="popover"] div,
+    [data-baseweb="menu"] ul,
+    [data-baseweb="menu"] li,
+    [data-baseweb="menu"] div,
+    [role="listbox"],
+    [role="listbox"] div {
+        background-color: #ffffff !important;
+    }
+    [role="option"],
+    [role="option"] *,
+    [data-baseweb="menu"] * {
+        color: #111827 !important;
+        -webkit-text-fill-color: #111827 !important;
+    }
+    [role="option"] {
+        background: #ffffff !important;
+        background-color: #ffffff !important;
+    }
+    [role="option"]:hover,
+    [role="option"][aria-selected="true"],
+    [role="option"][aria-current="true"] {
+        background: #eaf3ff !important;
+        background-color: #eaf3ff !important;
+    }
+    [data-testid="stMain"] [role="radiogroup"] label,
+    [data-testid="stMain"] [role="radiogroup"] label *,
+    [data-testid="stMain"] [data-baseweb="radio"] label,
+    [data-testid="stMain"] [data-baseweb="radio"] label * {
+        color: #111827 !important;
+        -webkit-text-fill-color: #111827 !important;
+    }
+    [data-testid="stMain"] [data-testid="stFileUploaderDropzone"] {
+        background: #ffffff !important;
+        border: 1.5px dashed #cbd5e1 !important;
+        border-radius: 10px !important;
+    }
+    [data-testid="stMain"] [data-testid="stFileUploaderDropzone"] *,
+    [data-testid="stMain"] [data-testid="stFileUploaderFile"] *,
+    [data-testid="stMain"] [data-testid="stFileUploader"] small,
+    [data-testid="stMain"] [data-testid="stFileUploader"] span,
+    [data-testid="stMain"] [data-testid="stFileUploader"] p {
+        color: #111827 !important;
+        -webkit-text-fill-color: #111827 !important;
+    }
+    [data-testid="stMain"] [data-testid="stFileUploaderDropzone"] button {
+        background: #111827 !important;
+        border-color: #111827 !important;
+    }
+    [data-testid="stMain"] [data-testid="stFileUploaderDropzone"] button,
+    [data-testid="stMain"] [data-testid="stFileUploaderDropzone"] button * {
+        color: #ffffff !important;
+        -webkit-text-fill-color: #ffffff !important;
+    }
 
     [data-testid="stMetric"] {
         background: #fff !important; border: 1px solid #E0E4E8 !important;
@@ -433,26 +657,16 @@ def show_recruiter_dashboard():
             finally:
                 _db2.close()
 
-        # Keep critical actions visible near the top so they don't disappear below the fold.
-        st.markdown("**⚙️ Account Actions**")
+        st.markdown("**⚙️ Account**")
         can_open_billing = bool(st.session_state.get("org_id"))
-        sidebar_action = st.selectbox(
-            "Account action",
-            ["No action", "Open Billing & Plan", "Log out"],
-            key="sidebar_account_action_select",
-            label_visibility="collapsed",
-        )
-        last_sidebar_action = st.session_state.get("_last_sidebar_action", "No action")
-        if sidebar_action != last_sidebar_action:
-            st.session_state["_last_sidebar_action"] = sidebar_action
-            if sidebar_action == "Open Billing & Plan":
-                if can_open_billing:
-                    st.session_state.show_billing_page = True
-                    st.rerun()
-                else:
-                    st.warning("Billing is unavailable because this account has no organization.")
-            elif sidebar_action == "Log out":
-                _recruiter_logout()
+        if st.button("Billing & Plan", use_container_width=True, key="sidebar_billing_btn"):
+            if can_open_billing:
+                st.session_state.show_billing_page = True
+                st.rerun()
+            else:
+                st.warning("Billing is unavailable because this account has no organization.")
+        if st.button("Log out", use_container_width=True, key="sidebar_logout_btn"):
+            _recruiter_logout()
 
         if not st.session_state.get("org_id"):
             st.caption("Billing is available after recruiter signup creates an organization.")
@@ -471,58 +685,15 @@ def show_recruiter_dashboard():
     </div>
     """, unsafe_allow_html=True)
 
-    # One-click logout outside Account Actions (select-driven to avoid hidden buttons).
-    st.markdown("**Session**")
-    logout_action = st.selectbox(
-        "Session action",
-        ["Stay logged in", "Logout now"],
-        key="logout_direct_select",
-        label_visibility="collapsed",
-    )
-    last_logout_action = st.session_state.get("_last_logout_action", "Stay logged in")
-    if logout_action != last_logout_action:
-        st.session_state["_last_logout_action"] = logout_action
-        if logout_action == "Logout now":
-            _recruiter_logout()
-
-    # Duplicate critical actions in the main area to avoid sidebar visibility issues.
-    st.markdown("**Quick Actions**")
-    main_action = st.selectbox(
-        "Quick action",
-        ["No action", "Open Billing & Plan", "Log out"],
-        key="main_quick_action_select",
-        label_visibility="collapsed",
-    )
-    last_main_action = st.session_state.get("_last_main_action", "No action")
-    if main_action != last_main_action:
-        st.session_state["_last_main_action"] = main_action
-        if main_action == "Open Billing & Plan":
-            if bool(st.session_state.get("org_id")):
-                st.session_state.show_billing_page = True
-                st.rerun()
-            else:
-                st.warning("Billing is unavailable because this account has no organization.")
-        elif main_action == "Log out":
-            _recruiter_logout()
-
     _org = st.session_state.get("org_id")
     if st.session_state.get("show_billing_page") and not _org:
         st.session_state.show_billing_page = False
     if st.session_state.get("show_billing_page") and _org:
         b1, b2 = st.columns([1, 4])
         with b1:
-            billing_nav = st.selectbox(
-                "Billing navigation",
-                ["Stay on billing", "Back to dashboard"],
-                key="billing_nav_select",
-                label_visibility="collapsed",
-            )
-            last_billing_nav = st.session_state.get("_last_billing_nav", "Stay on billing")
-            if billing_nav != last_billing_nav:
-                st.session_state["_last_billing_nav"] = billing_nav
-                if billing_nav == "Back to dashboard":
-                    st.session_state.show_billing_page = False
-                    st.rerun()
+            if st.button("Back to dashboard", use_container_width=True, key="billing_back_btn"):
+                st.session_state.show_billing_page = False
+                st.rerun()
         with b2:
             st.caption("Manage your subscription and usage.")
         try:
@@ -559,8 +730,6 @@ def show_recruiter_dashboard():
     elif nav_mode == "💼 Jobs":
         from recruiter_jd_page import show_jd_page
         show_jd_page()
-    elif nav_mode == "👥 Students":
-        _show_registered_students()
     elif nav_mode == "📈 Analytics":
         _show_analytics()
 
@@ -568,8 +737,83 @@ def show_recruiter_dashboard():
 # ─────────────────────────────────────────────
 # CANDIDATES OVERVIEW
 # ─────────────────────────────────────────────
+def _show_invitation_status_panel(job_postings):
+    candidates = []
+    job_by_id = {p.id: p for p in job_postings}
+    for posting in job_postings:
+        candidates.extend(get_candidates_by_jd(posting.id))
+
+    st.markdown("### Invitation Status")
+    if not candidates:
+        st.caption("No invites yet. Create a job, upload resumes, and send invites to track candidates here.")
+        st.markdown("---")
+        return
+
+    buckets = {"Invited": 0, "Started": 0, "Completed": 0, "Expired": 0}
+    for profile in candidates:
+        bucket = _invitation_bucket(profile.interview_status)
+        if bucket in buckets:
+            buckets[bucket] += 1
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Invited", buckets["Invited"])
+    m2.metric("Started", buckets["Started"])
+    m3.metric("Completed", buckets["Completed"])
+    m4.metric("Expired", buckets["Expired"])
+
+    visible = sorted(
+        candidates,
+        key=lambda p: (
+            {"In Progress": 0, "Invited": 1, "Shortlisted": 2, "Expired": 3}.get(p.interview_status or "", 4),
+            -(p.id or 0),
+        ),
+    )[:8]
+
+    with st.expander("View recent invite activity", expanded=True):
+        for profile in visible:
+            posting = job_by_id.get(profile.jd_id)
+            bucket = _invitation_bucket(profile.interview_status)
+            badge_class = _invitation_badge_class(bucket)
+            deadline = (
+                posting.deadline.strftime("%d %b %Y")
+                if posting and posting.deadline else "No deadline"
+            )
+            invited = (
+                profile.invite_sent_at.strftime("%d %b %Y")
+                if profile.invite_sent_at else "Not sent"
+            )
+            job_title = posting.title if posting else "Unknown job"
+            c1, c2, c3, c4 = st.columns([2.2, 2.1, 1.2, 1.2])
+            c1.markdown(
+                f"<strong>{html.escape(profile.name or '')}</strong><br/>"
+                f"<span style='color:#4b5563'>{html.escape(profile.email or '')}</span>",
+                unsafe_allow_html=True,
+            )
+            c2.markdown(
+                f"{html.escape(job_title)}<br/>"
+                f"<span style='color:#4b5563'>Deadline: {html.escape(deadline)}</span>",
+                unsafe_allow_html=True,
+            )
+            c3.markdown(
+                f'<span class="vbadge {badge_class}">{html.escape(bucket)}</span>',
+                unsafe_allow_html=True,
+            )
+            c4.caption(f"Invited: {invited}")
+
+        remaining = len(candidates) - len(visible)
+        if remaining > 0:
+            st.caption(f"{remaining} more invite(s) are available under Jobs.")
+
+    st.markdown("---")
+
+
 def _show_overview():
-    sessions = get_all_sessions()
+    org_id = _current_org_id()
+    check_expired_invites()
+    job_postings = get_job_postings_by_org(org_id)
+    _show_invitation_status_panel(job_postings)
+
+    sessions = get_sessions_by_org(org_id)
     if not sessions:
         st.info("🎤 No interviews yet. Candidates appear here after completing an interview.")
         return
@@ -589,6 +833,13 @@ def _show_overview():
 
     st.markdown("---")
 
+    job_options = ["All Jobs", "No JD"] + [
+        f"{p.title} (#{p.id})" for p in job_postings
+    ]
+    job_id_by_option = {
+        f"{p.title} (#{p.id})": p.id for p in job_postings
+    }
+
     col_s, col_f, col_sort = st.columns([3, 2, 2])
     with col_s:
         search = st.text_input("Search", placeholder="🔍 Search by name...",
@@ -601,12 +852,47 @@ def _show_overview():
         sort_by = st.selectbox("Sort",
                                ["Date ↓", "Score ↓", "Score ↑", "Name A-Z"],
                                label_visibility="collapsed")
+    col_job, col_score, col_risk = st.columns([3, 2, 2])
+    with col_job:
+        job_filter = st.selectbox("Job", job_options, label_visibility="collapsed")
+    with col_score:
+        score_filter = st.selectbox(
+            "Score",
+            ["All Scores", "75+ Strong", "55-74 Good", "35-54 Average", "<35 Needs Work"],
+            label_visibility="collapsed",
+        )
+    with col_risk:
+        risk_filter = st.selectbox(
+            "Proctoring Risk",
+            ["All Risk", "Low", "Medium", "High", "Critical"],
+            label_visibility="collapsed",
+        )
 
     filtered = list(sessions)
     if search.strip():
         filtered = [s for s in filtered if search.lower() in s.candidate_name.lower()]
     if status_filter != "All":
         filtered = [s for s in filtered if s.status == status_filter]
+    if job_filter == "No JD":
+        filtered = [s for s in filtered if not getattr(s, "jd_id", None)]
+    elif job_filter != "All Jobs":
+        selected_jd_id = job_id_by_option.get(job_filter)
+        filtered = [
+            s for s in filtered if getattr(s, "jd_id", None) == selected_jd_id
+        ]
+    if score_filter == "75+ Strong":
+        filtered = [s for s in filtered if (s.final_score or 0) >= 75]
+    elif score_filter == "55-74 Good":
+        filtered = [s for s in filtered if 55 <= (s.final_score or 0) < 75]
+    elif score_filter == "35-54 Average":
+        filtered = [s for s in filtered if 35 <= (s.final_score or 0) < 55]
+    elif score_filter == "<35 Needs Work":
+        filtered = [s for s in filtered if (s.final_score or 0) < 35]
+    if risk_filter != "All Risk":
+        filtered = [
+            s for s in filtered
+            if (getattr(s, "proctoring_risk", "Low") or "Low") == risk_filter
+        ]
     sort_map = {
         "Score ↓":  lambda s: -(s.final_score or 0),
         "Score ↑":  lambda s:  (s.final_score or 0),
@@ -620,6 +906,12 @@ def _show_overview():
         f"{len(filtered)} candidate(s)</p>",
         unsafe_allow_html=True,
     )
+    active_filters = [
+        label for label in (job_filter, score_filter, risk_filter)
+        if label not in ("All Jobs", "All Scores", "All Risk")
+    ]
+    if active_filters:
+        st.caption("Filters: " + " · ".join(active_filters))
 
     STATUS_ICON = {"Pending": "🕐", "Shortlisted": "⭐", "Rejected": "❌"}
     BADGE_CLASS = {"Strong Advance": "vb-green", "Advance": "vb-blue",
@@ -629,12 +921,13 @@ def _show_overview():
         sc      = s.final_score or 0
         emoji   = "🟢" if sc >= 75 else ("🟡" if sc >= 55 else "🔴")
         verdict = _verdict_from_score(s.cognitive_score or 5.0)
+        decision, decision_class = _decision_for_session(s)
         bc      = BADGE_CLASS.get(verdict, "vb-yellow")
         si      = STATUS_ICON.get(s.status, "")
         insight_data = _safe_json_loads(s.insight_json, {})
 
         with st.container(border=True):
-            c1, c2, c3, c4, c5, c6, c7 = st.columns([2.5, 0.8, 0.7, 0.7, 0.7, 1.2, 1.0])
+            c1, c2, c3, c4, c5 = st.columns([2.8, 0.9, 1.1, 1.2, 1.0])
             nm = html.escape(s.candidate_name or "")
             un = html.escape(s.username or "—")
             stt = html.escape(s.status or "")
@@ -650,25 +943,27 @@ def _show_overview():
                 unsafe_allow_html=True,
             )
             c3.markdown(
-                f'<p style="color:#374151;font-size:13px;margin:0">🧠 {round(s.cognitive_score or 0, 1)}</p>',
-                unsafe_allow_html=True,
-            )
+                f'<span class="vbadge {decision_class}">{decision}</span>',
+                unsafe_allow_html=True)
+
+            # Proctoring risk badge
+            _proctor_risk = getattr(s, 'proctoring_risk', 'Low') or 'Low'
+            _proctor_color = {"Low": "#16a34a", "Medium": "#d97706", "High": "#dc2626", "Critical": "#7f1d1d"}.get(_proctor_risk, "#6B7280")
+            _proctor_icon = {"Low": "&#x1F6E1;", "Medium": "&#x26A0;", "High": "&#x1F6A8;", "Critical": "&#x1F6D1;"}.get(_proctor_risk, "")
+            _tab_ct = getattr(s, 'tab_switch_count', 0) or 0
+
             c4.markdown(
-                f'<p style="color:#374151;font-size:13px;margin:0">😊 {round(s.emotion_score or 0, 1)}</p>',
+                f'<p style="color:#374151;font-size:12px;margin:0">'
+                f"{html.escape(s.created_at.strftime('%d %b %Y'))}<br/>"
+                f'<span style="color:{_proctor_color};font-size:11px;font-weight:600">'
+                f'{_proctor_icon} {_proctor_risk}'
+                f'{"" if _tab_ct == 0 else f" ({_tab_ct} tab)"}'
+                f'</span></p>',
                 unsafe_allow_html=True,
             )
             c5.markdown(
-                f'<p style="color:#374151;font-size:13px;margin:0">👁 {round(s.engagement_score or 0, 1)}</p>',
-                unsafe_allow_html=True,
-            )
-            c6.markdown(
                 f'<span class="vbadge {bc}">{_verdict_badge(verdict)}</span>',
                 unsafe_allow_html=True)
-            c7.markdown(
-                f'<p style="color:#374151;font-size:12px;margin:0">'
-                f"{html.escape(s.created_at.strftime('%d %b %Y'))}</p>",
-                unsafe_allow_html=True,
-            )
 
             b1, b2, b3 = st.columns([1.5, 1, 1])
             with b1:
@@ -677,7 +972,7 @@ def _show_overview():
                     st.rerun()
             with b2:
                 st.download_button(
-                    "⬇ PDF", data=generate_candidate_pdf(s.id),
+                    "⬇ PDF", data=generate_candidate_pdf(s.id, org_id),
                     file_name=f"psysense_{s.candidate_name.replace(' ','_')}_{s.id}.pdf",
                     mime="application/pdf",
                     key=f"pdf_{s.id}", use_container_width=True)
@@ -723,9 +1018,11 @@ def _show_overview():
 # CANDIDATE DETAIL
 # ─────────────────────────────────────────────
 def _show_candidate_detail(session_id: int):
-    s = get_session_by_id(session_id)
+    org_id = _current_org_id()
+    s = get_session_by_id_for_org(session_id, org_id)
     if not s:
-        st.error("❌ Candidate not found.")
+        st.error("Candidate not found or not available for this recruiter account.")
+        st.session_state.recruiter_detail_id = None
         return
 
     insight  = _safe_json_loads(s.insight_json, {})
@@ -735,6 +1032,49 @@ def _show_candidate_detail(session_id: int):
     sc      = s.final_score or 0
     verdict = _verdict_from_score(s.cognitive_score or 5.0)
     vc      = _verdict_color(verdict)
+    proctor = _safe_json_loads(getattr(s, "proctoring_json", None), {})
+    risk = proctor.get("risk_level", getattr(s, "proctoring_risk", "Low") or "Low") if proctor else (getattr(s, "proctoring_risk", "Low") or "Low")
+    risk_color = {
+        "Low": C["primary"],
+        "Medium": C["accent"],
+        "High": C["danger"],
+        "Critical": "#7f1d1d",
+    }.get(risk, C["muted"])
+
+    if verdict in ("Strong Advance", "Advance") and risk in ("Low", "Medium"):
+        decision = "Advance"
+        decision_note = "Candidate looks suitable for the next hiring step."
+        decision_color = C["primary"]
+    elif verdict == "Do Not Advance" or sc < 45:
+        decision = "Reject"
+        decision_note = "Candidate does not currently meet the role signal threshold."
+        decision_color = C["danger"]
+    else:
+        decision = "Hold"
+        decision_note = "Review answers and proctoring context before deciding."
+        decision_color = C["accent"]
+
+    strengths = [str(x) for x in insight.get("strengths", []) if x][:2]
+    weaknesses = [str(x) for x in insight.get("weaknesses", []) if x][:2]
+    if not strengths:
+        if (s.cognitive_score or 0) >= 6:
+            strengths.append("Relevant answer quality")
+        if (s.engagement_score or 0) >= 6:
+            strengths.append("Good attentiveness")
+    if not weaknesses:
+        if (s.cognitive_score or 0) < 6:
+            weaknesses.append("Answer quality needs review")
+        if (s.engagement_score or 0) < 6:
+            weaknesses.append("Attentiveness signal needs review")
+    if risk in ("High", "Critical"):
+        weaknesses.insert(0, f"{risk} proctoring risk")
+    strengths = strengths[:2] or ["No major strength detected"]
+    weaknesses = weaknesses[:2] or ["No major concern detected"]
+    next_action = {
+        "Advance": "Shortlist or schedule the next round.",
+        "Hold": "Open question breakdown and add recruiter notes.",
+        "Reject": "Mark rejected or keep notes for audit.",
+    }[decision]
 
     h1, h2 = st.columns([4, 1])
     with h1:
@@ -745,7 +1085,7 @@ def _show_candidate_detail(session_id: int):
             f"{'JD ✓' if s.jd_used else 'No JD'} · ID #{s.id}")
     with h2:
         st.download_button(
-            "⬇ PDF", data=generate_candidate_pdf(session_id),
+            "⬇ PDF", data=generate_candidate_pdf(session_id, org_id),
             file_name=f"psysense_{s.candidate_name.replace(' ','_')}_{s.id}.pdf",
             mime="application/pdf",
             key=f"pdf_detail_{session_id}", use_container_width=True)
@@ -758,6 +1098,60 @@ def _show_candidate_detail(session_id: int):
         Score: <b>{sc}/100</b> &nbsp;|&nbsp;
         Recommendation: <b>{insight.get("recommendation","N/A")}</b>
       </span>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown(f"""
+    <div style="background:#fff;border:1px solid {C['border']};border-radius:12px;
+         padding:18px 20px;margin:14px 0 18px;box-shadow:0 1px 3px rgba(15,23,42,0.06)">
+      <div style="display:flex;justify-content:space-between;gap:16px;align-items:flex-start;
+           flex-wrap:wrap;margin-bottom:14px">
+        <div>
+          <div style="font-size:11px;font-weight:700;color:{C['muted']};
+               text-transform:uppercase;letter-spacing:.6px">Decision Summary</div>
+          <div style="font-size:24px;font-weight:800;color:{decision_color};line-height:1.25">
+            {html.escape(decision)}
+          </div>
+          <div style="font-size:13px;color:#374151;margin-top:3px">
+            {html.escape(decision_note)}
+          </div>
+        </div>
+        <div style="text-align:right">
+          <div style="font-size:11px;font-weight:700;color:{C['muted']};
+               text-transform:uppercase;letter-spacing:.6px">Proctoring</div>
+          <div style="font-size:18px;font-weight:800;color:{risk_color}">
+            {html.escape(risk)}
+          </div>
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px">
+        <div style="border-top:1px solid {C['border']};padding-top:12px">
+          <div style="font-size:12px;font-weight:700;color:{C['primary']};margin-bottom:6px">
+            Top Strengths
+          </div>
+          <div style="font-size:13px;color:#111827;line-height:1.6">
+            1. {html.escape(strengths[0])}<br>
+            2. {html.escape(strengths[1] if len(strengths) > 1 else strengths[0])}
+          </div>
+        </div>
+        <div style="border-top:1px solid {C['border']};padding-top:12px">
+          <div style="font-size:12px;font-weight:700;color:{C['danger']};margin-bottom:6px">
+            Main Concerns
+          </div>
+          <div style="font-size:13px;color:#111827;line-height:1.6">
+            1. {html.escape(weaknesses[0])}<br>
+            2. {html.escape(weaknesses[1] if len(weaknesses) > 1 else weaknesses[0])}
+          </div>
+        </div>
+        <div style="border-top:1px solid {C['border']};padding-top:12px">
+          <div style="font-size:12px;font-weight:700;color:{C['secondary']};margin-bottom:6px">
+            Next Action
+          </div>
+          <div style="font-size:13px;color:#111827;line-height:1.6">
+            {html.escape(next_action)}
+          </div>
+        </div>
+      </div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -779,7 +1173,7 @@ def _show_candidate_detail(session_id: int):
 
     with g2:
         fig_bar = go.Figure(go.Bar(
-            x=["Answer Quality", "Emotional Tone", "Attentiveness"],
+            x=["Answer Quality", "Delivery Signal", "Attentiveness"],
             y=[s.cognitive_score or 5, s.emotion_score or 5, s.engagement_score or 5],
             marker_color=[C["info"], C["accent"], C["primary"]],
             text=[f"{round(s.cognitive_score or 5,1)}/10",
@@ -967,7 +1361,7 @@ def _show_candidate_detail(session_id: int):
         fig_t = go.Figure()
         for name, key, color in [
             ("Answer Quality", "cognitive",  C["info"]),
-            ("Emotional Tone", "emotion",    C["accent"]),
+            ("Delivery Signal", "emotion",    C["accent"]),
             ("Attentiveness",  "engagement", C["primary"]),
         ]:
             fig_t.add_trace(go.Scatter(
@@ -998,7 +1392,7 @@ def _show_candidate_detail(session_id: int):
 
                 m1, m2, m3, m4 = st.columns(4)
                 m1.metric("Answer Quality", f"{round(qd.get('cognitive',5),1)}/10")
-                m2.metric("Emotional Tone", f"{round(qd.get('emotion',5),1)}/10")
+                m2.metric("Delivery Signal", f"{round(qd.get('emotion',5),1)}/10")
                 m3.metric("Attentiveness",  f"{round(qd.get('engagement',5),1)}/10")
                 m4.metric("Face Visible",   f"{100-qd.get('absence',0)*100:.0f}%")
 
@@ -1023,51 +1417,15 @@ def _show_candidate_detail(session_id: int):
                 if sb:
                     st.markdown("**🎙️ Speech**")
                     s1, s2, s3 = st.columns(3)
-                    s1.metric("Emotion",     f"{sb.get('emotion_model',5)}/10")
+                    s1.metric("Delivery",     f"{sb.get('delivery_model', sb.get('emotion_model',5))}/10")
                     s2.metric("Fluency",      f"{sb.get('fluency_score',5)}/10")
-                    s3.metric("Voice Energy", f"{sb.get('voice_score',5)}/10")
-                    if sb.get("dominant_emotion"):
-                        st.caption(
-                            f"Dominant: **{sb['dominant_emotion'].capitalize()}**")
-
-                fe = qd.get("facial_emotion", {})
-                if fe and fe.get("breakdown"):
-                    dominant = fe.get("dominant", "neutral")
-                    label_map = {
-                        "happy": "Confident", "neutral": "Composed",
-                        "surprise": "Off guard", "fear": "Nervous",
-                        "sad": "Low energy", "angry": "Stressed",
-                        "disgust": "Uncomfortable",
-                    }
-                    st.markdown(
-                        f"**😶 Facial Emotion:** "
-                        f"{EMOTION_EMOJI.get(dominant,'😐')} "
-                        f"{label_map.get(dominant, dominant.capitalize())}")
-
+                    s3.metric("Voice Consistency", f"{sb.get('voice_score',5)}/10")
 
 # ─────────────────────────────────────────────
 # STUDENTS
 # ─────────────────────────────────────────────
 def _show_registered_students():
-    st.markdown("### 👥 Registered Students")
-    users = get_all_users()
-    if not users:
-        st.info("No student accounts registered yet.")
-        return
-
-    sessions = get_all_sessions()
-    sc_map = {}
-    for s in sessions:
-        if s.username:
-            sc_map[s.username] = sc_map.get(s.username, 0) + 1
-
-    for u in users:
-        with st.container(border=True):
-            c1, c2, c3 = st.columns([3, 1, 1])
-            c1.markdown(
-                f"**{u.display_name or u.username}**  \n`{u.username}`")
-            c2.metric("Interviews", sc_map.get(u.username, 0))
-            c3.caption(u.created_at.strftime("%d %b %Y"))
+    st.info("Student management was removed from the recruiter dashboard. Use Candidates and Jobs instead.")
 
 
 # ─────────────────────────────────────────────
@@ -1075,9 +1433,58 @@ def _show_registered_students():
 # ─────────────────────────────────────────────
 def _show_analytics():
     st.markdown("### 📈 Advanced Analytics")
-    sessions = get_all_sessions()
-    if not sessions:
+    org_id = _current_org_id()
+    sessions = get_sessions_by_org(org_id)
+    postings = get_job_postings_by_org(org_id)
+    posting_stats = [get_jd_stats(p.id) for p in postings]
+
+    invited = sum(s.get("Invited", 0) for s in posting_stats)
+    in_progress = sum(s.get("In Progress", 0) for s in posting_stats)
+    completed_profiles = sum(s.get("Completed", 0) for s in posting_stats)
+    passed_profiles = sum(s.get("Passed", 0) for s in posting_stats)
+    below_profiles = sum(s.get("Below Threshold", 0) for s in posting_stats)
+    expired_profiles = sum(s.get("Expired", 0) for s in posting_stats)
+    shortlisted_profiles = sum(s.get("Shortlisted", 0) for s in posting_stats)
+    completed_sessions = len(sessions)
+    completed_total = max(completed_profiles + passed_profiles + below_profiles, completed_sessions)
+
+    if not sessions and not postings:
         st.info("No data yet.")
+        return
+
+    st.markdown("#### Hiring Funnel")
+    f1, f2, f3, f4, f5, f6 = st.columns(6)
+    f1.metric("Jobs", len(postings))
+    f2.metric("Invited", invited)
+    f3.metric("In Progress", in_progress)
+    f4.metric("Completed", completed_total)
+    f5.metric("Passed", passed_profiles)
+    f6.metric("Shortlisted", shortlisted_profiles)
+
+    funnel_labels = ["Invited", "In Progress", "Completed", "Passed", "Shortlisted"]
+    funnel_values = [invited, in_progress, completed_total, passed_profiles, shortlisted_profiles]
+    fig_funnel = go.Figure(go.Bar(
+        x=funnel_labels,
+        y=funnel_values,
+        marker_color=[C["secondary"], C["info"], C["primary"], "#16a34a", C["accent"]],
+        text=funnel_values,
+        textposition="outside",
+    ))
+    fig_funnel.update_layout(
+        height=280,
+        showlegend=False,
+        yaxis_title="Candidates",
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        margin=dict(t=10, b=30),
+    )
+    st.plotly_chart(fig_funnel, use_container_width=True)
+
+    if expired_profiles:
+        st.caption(f"{expired_profiles} invite(s) expired.")
+
+    if not sessions:
+        st.info("No completed interviews yet. Funnel data will update as candidates finish interviews.")
         return
 
     c1, c2 = st.columns(2)
@@ -1110,7 +1517,7 @@ def _show_analytics():
     n = len(sessions)
     signals = {
         "Answer Quality": sum(s.cognitive_score  or 0 for s in sessions) / n,
-        "Emotional Tone": sum(s.emotion_score    or 0 for s in sessions) / n,
+        "Delivery Signal": sum(s.emotion_score    or 0 for s in sessions) / n,
         "Attentiveness":  sum(s.engagement_score or 0 for s in sessions) / n,
     }
     fig3 = go.Figure(go.Bar(

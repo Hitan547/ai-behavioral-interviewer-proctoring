@@ -76,6 +76,10 @@ class EngagementDetector:
         self._score_samples = []
         self._frame_count   = 0
 
+        # Multi-face proctoring
+        self._multi_face_count   = 0   # total events this question
+        self._multi_face_cooldown = 0  # avoid spamming count every frame
+
     def process_frame(self, bgr_frame: np.ndarray) -> np.ndarray:
         h, w      = bgr_frame.shape[:2]
         annotated = bgr_frame.copy()
@@ -126,6 +130,31 @@ class EngagementDetector:
                 # Draw face center dot
                 cv2.circle(annotated, (int(face_cx * w), int(face_cy * h)), 5, (0, 255, 255), -1)
 
+                # ── Multi-face proctoring ──
+                if len(faces) > 1:
+                    # Cooldown: count one event per ~2 seconds (60 frames)
+                    if self._multi_face_cooldown <= 0:
+                        self._multi_face_count += 1
+                        self._multi_face_cooldown = 60
+                    else:
+                        self._multi_face_cooldown -= 1
+
+                    # Draw red boxes around extra faces
+                    for fx, fy, ffw, ffh in faces:
+                        if (fx, fy, ffw, ffh) != (x, y, fw, fh):
+                            cv2.rectangle(annotated, (fx, fy),
+                                          (fx + ffw, fy + ffh), (0, 0, 255), 2)
+
+                    # Warning banner
+                    cv2.rectangle(annotated, (w//2 - 140, 75), (w//2 + 140, 105),
+                                  (0, 0, 180), -1)
+                    cv2.putText(annotated, "Multiple faces detected!",
+                                (w//2 - 125, 96),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
+                else:
+                    if self._multi_face_cooldown > 0:
+                        self._multi_face_cooldown -= 1
+
                 annotated = self._draw_hud(annotated, w, h, gaze_ok, eyes_visible)
 
             else:
@@ -172,6 +201,11 @@ class EngagementDetector:
     def is_low_presence(self) -> bool:
         return self.get_absence_ratio() > self._ABSENCE_FLAG
 
+    def get_multi_face_count(self) -> int:
+        """Return total multi-face detection events for this question period."""
+        with self._lock:
+            return self._multi_face_count
+
     def get_emotion_summary(self) -> dict:
         return dict(_NEUTRAL_EMOTION)
 
@@ -206,6 +240,7 @@ class EngagementDetector:
             absent = (round(self._absent_frames / self._total_frames, 3)
                       if self._total_frames > 0 else 0.0)
             emotion = dict(_NEUTRAL_EMOTION)
+            multi_face = self._multi_face_count
 
             # Reset inline so nothing changes between reads
             self._face_present.clear()
@@ -217,8 +252,10 @@ class EngagementDetector:
             self._score_samples      = []
             self._frame_count        = 0
             self._countdown_value    = None
+            self._multi_face_count   = 0
+            self._multi_face_cooldown = 0
 
-        return score, absent, emotion
+        return score, absent, emotion, multi_face
 
     def _compute_score(self) -> float:
         n = len(self._face_present)

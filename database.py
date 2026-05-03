@@ -25,7 +25,7 @@ V2 additions:
 
 from sqlalchemy import (
     create_engine, Column, Integer, String, Float,
-    DateTime, Boolean, Text, ForeignKey, func
+    DateTime, Boolean, Text, ForeignKey, func, or_, text
 )
 from sqlalchemy.orm import declarative_base, sessionmaker
 from datetime import datetime
@@ -72,6 +72,7 @@ class JobPosting(Base):
     created_at     = Column(DateTime, default=datetime.utcnow)
     status         = Column(String,   default="Active")    # Active / Closed
     recruiter_email = Column(String,  nullable=True) 
+    org_id         = Column(String,   nullable=True)
 
 class CandidateProfile(Base):
     """
@@ -89,6 +90,9 @@ class CandidateProfile(Base):
     match_reason     = Column(Text,     nullable=True)
     key_matches      = Column(Text,     nullable=True)       # JSON list
     key_gaps         = Column(Text,     nullable=True)       # JSON list
+    questions_json   = Column(Text,     nullable=True)       # JSON list
+    keywords_json    = Column(Text,     nullable=True)       # JSON list of lists
+    vocab_json       = Column(Text,     nullable=True)       # JSON dict
     username         = Column(String,   nullable=True)       # auto-generated
     temp_password    = Column(String,   nullable=True)       # shown once to recruiter
     account_created  = Column(Boolean,  default=False)
@@ -121,6 +125,11 @@ class CandidateSession(Base):
     jd_id           = Column(Integer, ForeignKey("job_postings.id"), nullable=True)  # V2
     status          = Column(String,  default="Pending")
     recruiter_notes = Column(Text,    nullable=True)
+
+    # Anti-cheating proctoring data
+    proctoring_json  = Column(Text,    nullable=True)     # Full event log JSON
+    proctoring_risk  = Column(String,  default="Low")     # Low / Medium / High
+    tab_switch_count = Column(Integer, default=0)
 
 
 # ── Private helpers ───────────────────────────────────────────────────────
@@ -168,6 +177,34 @@ def init_db():
     Base.metadata.create_all(bind=engine)
     db = SessionLocal()
     try:
+        if DATABASE_URL.startswith("sqlite"):
+            existing_cols = {
+                row[1] for row in db.execute(text("PRAGMA table_info(job_postings)")).fetchall()
+            }
+            if "org_id" not in existing_cols:
+                db.execute(text("ALTER TABLE job_postings ADD COLUMN org_id VARCHAR"))
+                db.commit()
+            profile_cols = {
+                row[1] for row in db.execute(text("PRAGMA table_info(candidate_profiles)")).fetchall()
+            }
+            for col_name in ("questions_json", "keywords_json", "vocab_json"):
+                if col_name not in profile_cols:
+                    db.execute(text(f"ALTER TABLE candidate_profiles ADD COLUMN {col_name} TEXT"))
+            db.commit()
+            orphaned_postings = db.query(JobPosting).filter(
+                JobPosting.org_id.is_(None),
+                JobPosting.recruiter_email.isnot(None),
+            ).all()
+            for posting in orphaned_postings:
+                owner = db.query(User).filter(
+                    func.lower(User.email) == (posting.recruiter_email or "").casefold(),
+                    User.role == "recruiter",
+                    User.org_id.isnot(None),
+                ).first()
+                if owner:
+                    posting.org_id = owner.org_id
+            if orphaned_postings:
+                db.commit()
         if not db.query(User).filter_by(username="recruiter").first():
             _default_pw = os.getenv("RECRUITER_DEFAULT_PASSWORD", "admin123")
             db.add(User(
@@ -226,6 +263,7 @@ def verify_login(username: str, password: str):
                     "role":         user.role,
                     "display_name": user.display_name or user.username,
                     "email":        user.email,
+                    "org_id":       user.org_id,
                 }
             return None
 
@@ -244,6 +282,7 @@ def verify_login(username: str, password: str):
                     "role":         u.role,
                     "display_name": u.display_name or u.username,
                     "email":        u.email,
+                    "org_id":       u.org_id,
                 }
 
         return None
@@ -287,6 +326,7 @@ def save_session(
     jd_used:            bool = False,
     recruiter_verdicts: list = None,
     jd_id:              int  = None,   # V2 — pass if interview was JD-linked
+    proctoring_data:    dict = None,   # V3 — anti-cheating proctoring summary
 ) -> int:
     init_db()
     db = SessionLocal()
@@ -306,6 +346,9 @@ def save_session(
             jd_used                 = jd_used,
             jd_id                   = jd_id,
             status                  = "Pending",
+            proctoring_json         = json.dumps(proctoring_data)    if proctoring_data    else None,
+            proctoring_risk         = (proctoring_data or {}).get("risk_level", "Low"),
+            tab_switch_count        = (proctoring_data or {}).get("tab_switch_count", 0),
         )
         db.add(rec)
         db.commit()
@@ -331,6 +374,56 @@ def get_all_sessions():
         return db.query(CandidateSession).order_by(
             CandidateSession.created_at.desc()
         ).all()
+    finally:
+        db.close()
+
+
+def get_sessions_by_org(org_id: str = None):
+    """Return sessions filtered by org_id via User table.
+    Falls back to all sessions if org_id is None."""
+    init_db()
+    db = SessionLocal()
+    try:
+        q = db.query(CandidateSession)
+        if org_id:
+            org_usernames = [
+                u.username for u in db.query(User.username)
+                .filter(User.org_id == org_id).all()
+            ]
+            org_job_ids = [
+                p.id for p in db.query(JobPosting.id)
+                .filter(JobPosting.org_id == org_id).all()
+            ]
+            filters = []
+            if org_usernames:
+                filters.append(CandidateSession.username.in_(org_usernames))
+            if org_job_ids:
+                filters.append(CandidateSession.jd_id.in_(org_job_ids))
+            q = q.filter(or_(*filters)) if filters else q.filter(False)
+        return q.order_by(CandidateSession.created_at.desc()).all()
+    finally:
+        db.close()
+
+
+def get_session_by_id_for_org(session_id: int, org_id: str = None):
+    """Return one session only if it belongs to the supplied org."""
+    if not org_id:
+        return get_session_by_id(session_id)
+    init_db()
+    db = SessionLocal()
+    try:
+        rec = db.query(CandidateSession).filter(CandidateSession.id == session_id).first()
+        if not rec:
+            return None
+        if rec.username:
+            user = db.query(User).filter(User.username == rec.username).first()
+            if user and user.org_id == org_id:
+                return rec
+        if rec.jd_id:
+            posting = db.query(JobPosting).filter(JobPosting.id == rec.jd_id).first()
+            if posting and posting.org_id == org_id:
+                return rec
+        return None
     finally:
         db.close()
 
@@ -395,6 +488,7 @@ def save_job_posting(
     min_pass_score: int      = 60,
     deadline:       datetime = None,
     recruiter_email: str      = None,
+    org_id:         str       = None,
 ) -> int:
     """Create a new job posting. Returns the new posting id."""
     init_db()
@@ -407,6 +501,7 @@ def save_job_posting(
             deadline       = deadline,
             status         = "Active",
             recruiter_email = recruiter_email,
+            org_id         = org_id,
         )
         db.add(posting)
         db.commit()
@@ -426,10 +521,36 @@ def get_all_job_postings():
         db.close()
 
 
+def get_job_postings_by_org(org_id: str = None):
+    """Return job postings visible to one recruiter org."""
+    init_db()
+    db = SessionLocal()
+    try:
+        q = db.query(JobPosting)
+        if org_id:
+            q = q.filter(JobPosting.org_id == org_id)
+        return q.order_by(JobPosting.created_at.desc()).all()
+    finally:
+        db.close()
+
+
 def get_job_posting_by_id(jd_id: int):
     db = SessionLocal()
     try:
         return db.query(JobPosting).filter(JobPosting.id == jd_id).first()
+    finally:
+        db.close()
+
+
+def get_job_posting_by_id_for_org(jd_id: int, org_id: str = None):
+    if not org_id:
+        return get_job_posting_by_id(jd_id)
+    db = SessionLocal()
+    try:
+        return db.query(JobPosting).filter(
+            JobPosting.id == jd_id,
+            JobPosting.org_id == org_id,
+        ).first()
     finally:
         db.close()
 
@@ -447,6 +568,20 @@ def close_job_posting(jd_id: int):
 
 # ── V2: Candidate Profile CRUD ────────────────────────────────────────────
 
+def close_job_posting_for_org(jd_id: int, org_id: str = None):
+    db = SessionLocal()
+    try:
+        q = db.query(JobPosting).filter(JobPosting.id == jd_id)
+        if org_id:
+            q = q.filter(JobPosting.org_id == org_id)
+        posting = q.first()
+        if posting:
+            posting.status = "Closed"
+            db.commit()
+    finally:
+        db.close()
+
+
 def save_candidate_profile(
     name:            str,
     email:           str,
@@ -457,6 +592,9 @@ def save_candidate_profile(
     match_reason:    str   = "",
     key_matches:     list  = None,
     key_gaps:        list  = None,
+    questions:       list  = None,
+    keywords:        list  = None,
+    vocab:           dict  = None,
 ) -> int:
     """Save a matched candidate before account creation. Returns profile id."""
     init_db()
@@ -472,6 +610,9 @@ def save_candidate_profile(
             match_reason    = match_reason,
             key_matches     = json.dumps(key_matches or []),
             key_gaps        = json.dumps(key_gaps    or []),
+            questions_json   = json.dumps(questions or []),
+            keywords_json    = json.dumps(keywords or []),
+            vocab_json       = json.dumps(vocab or {}),
             interview_status = "Shortlisted",
         )
         db.add(profile)
@@ -497,6 +638,9 @@ def create_candidate_account(profile_id: int) -> dict:
         if not profile:
             return {"error": "Profile not found"}
 
+        posting = db.query(JobPosting).filter(JobPosting.id == profile.jd_id).first()
+        profile_org_id = posting.org_id if posting else None
+
         if profile.account_created:
             # Re-invite path: return existing credentials when available.
             # If the temp password was cleared, rotate to a fresh one.
@@ -507,8 +651,15 @@ def create_candidate_account(profile_id: int) -> dict:
                 if not user:
                     return {"error": "User not found for existing profile"}
                 user.password_hash = _hash(existing_password)
+                if profile_org_id:
+                    user.org_id = profile_org_id
                 profile.temp_password = existing_password
                 db.commit()
+            elif profile_org_id:
+                user = db.query(User).filter(User.username == profile.username).first()
+                if user and user.org_id != profile_org_id:
+                    user.org_id = profile_org_id
+                    db.commit()
 
             return {
                 "username": profile.username,
@@ -516,47 +667,29 @@ def create_candidate_account(profile_id: int) -> dict:
                 "already_existed": True,
             }
 
-        password = None
+        # Always generate a fresh, unique username + password per candidate.
+        # Each person who receives an invite gets their own distinct credentials.
+        password = _random_password(10)
+        username = _generate_username(profile.name)
 
-        # Reuse latest student account for same email to avoid multiple usernames
-        # being emailed for the same person across repeated invites.
-        existing_student = None
-        if profile.email:
-            existing_student = (
-                db.query(User)
-                .filter(User.email == profile.email, User.role == "student")
-                .order_by(User.id.desc())
-                .first()
-            )
-
-        if existing_student:
-            username = existing_student.username
-            # Keep credentials stable across repeated invites for the same student.
-            # Reuse the latest known temp_password for this username when available.
-            prior_profile = (
-                db.query(CandidateProfile)
-                .filter(
-                    CandidateProfile.username == username,
-                    CandidateProfile.temp_password != None,
-                )
-                .order_by(CandidateProfile.id.desc())
-                .first()
-            )
-            password = prior_profile.temp_password if prior_profile and prior_profile.temp_password else _random_password(8)
-            # Ensure stored hash always matches the credential being sent.
-            existing_student.password_hash = _hash(password)
+        # Check if this exact username already exists (edge case from prior run)
+        existing_user = db.query(User).filter_by(username=username).first()
+        if existing_user:
+            # Rotate password on the existing account
+            existing_user.password_hash = _hash(password)
             if profile.name:
-                existing_student.display_name = profile.name
+                existing_user.display_name = profile.name
         else:
-            password = _random_password(8)
-            username = _generate_username(profile.name)
             db.add(User(
                 username      = username,
                 password_hash = _hash(password),
                 role          = "student",
                 display_name  = profile.name,
                 email         = profile.email,
+                org_id        = profile_org_id,
             ))
+        if existing_user and profile_org_id:
+            existing_user.org_id = profile_org_id
 
         # Update profile
         profile.username        = username
@@ -568,7 +701,6 @@ def create_candidate_account(profile_id: int) -> dict:
         return {
             "username": username,
             "password": password,
-            "reused_account": bool(existing_student),
         }
     finally:
         db.close()
@@ -628,6 +760,46 @@ def get_profile_by_username(username: str):
         return db.query(CandidateProfile).filter(
             CandidateProfile.username == username
         ).first()
+    finally:
+        db.close()
+
+
+def get_profile_for_candidate(username: str = "", email: str = ""):
+    """Get an invited candidate profile by username, with email fallback.
+
+    Username is the primary link. Email fallback helps older/manual student
+    accounts reach their latest invited profile during local testing.
+    """
+    db = SessionLocal()
+    try:
+        username = (username or "").strip()
+        email = (email or "").strip()
+        if username:
+            profile = db.query(CandidateProfile).filter(
+                CandidateProfile.username == username
+            ).order_by(CandidateProfile.id.desc()).first()
+            if profile:
+                return profile
+        if email:
+            return db.query(CandidateProfile).filter(
+                func.lower(CandidateProfile.email) == email.casefold(),
+                CandidateProfile.resume_text.isnot(None),
+            ).order_by(CandidateProfile.id.desc()).first()
+        return None
+    finally:
+        db.close()
+
+
+def save_candidate_questions(profile_id: int, questions: list, keywords: list = None, vocab: dict = None):
+    """Persist prepared interview questions for an invited candidate."""
+    db = SessionLocal()
+    try:
+        profile = db.query(CandidateProfile).filter(CandidateProfile.id == profile_id).first()
+        if profile:
+            profile.questions_json = json.dumps(questions or [])
+            profile.keywords_json = json.dumps(keywords or [])
+            profile.vocab_json = json.dumps(vocab or {})
+            db.commit()
     finally:
         db.close()
 
