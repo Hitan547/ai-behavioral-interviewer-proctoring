@@ -34,17 +34,27 @@ import bcrypt
 
 # Keep the default DB path consistent with .env and manual Streamlit runs.
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./psysense.db")
+_IS_SQLITE = DATABASE_URL.startswith("sqlite")
 
-if DATABASE_URL.startswith("sqlite:///"):
+if _IS_SQLITE:
     _db_path = DATABASE_URL.replace("sqlite:///", "")
     _db_dir  = os.path.dirname(_db_path)
     if _db_dir:
         os.makedirs(_db_dir, exist_ok=True)
 
-engine = create_engine(
-    DATABASE_URL,
-    connect_args={"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
-)
+# Connection pool tuning for PostgreSQL; SQLite needs check_same_thread=False.
+_engine_kwargs: dict = {}
+if _IS_SQLITE:
+    _engine_kwargs["connect_args"] = {"check_same_thread": False}
+else:
+    _engine_kwargs.update({
+        "pool_size":        int(os.getenv("DATABASE_POOL_SIZE", "5")),
+        "max_overflow":     int(os.getenv("DATABASE_MAX_OVERFLOW", "10")),
+        "pool_pre_ping":    True,   # auto-reconnect stale connections
+        "pool_recycle":     1800,   # recycle connections every 30 min
+    })
+
+engine = create_engine(DATABASE_URL, **_engine_kwargs)
 SessionLocal = sessionmaker(bind=engine)
 Base         = declarative_base()
 # ── Models ────────────────────────────────────────────────────────────────
@@ -173,38 +183,54 @@ def _generate_username(name: str) -> str:
 
 # ── Init ──────────────────────────────────────────────────────────────────
 
+def _get_existing_columns(db, table_name: str) -> set:
+    """Return column names for a table. Works on SQLite and PostgreSQL."""
+    if _IS_SQLITE:
+        rows = db.execute(text(f"PRAGMA table_info({table_name})")).fetchall()
+        return {row[1] for row in rows}
+    else:
+        # PostgreSQL: use information_schema
+        rows = db.execute(text(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = :tbl"
+        ), {"tbl": table_name}).fetchall()
+        return {row[0] for row in rows}
+
+
+def _safe_add_column(db, table_name: str, col_name: str, col_type: str = "TEXT"):
+    """Add a column if it doesn't exist. Works on SQLite and PostgreSQL."""
+    existing = _get_existing_columns(db, table_name)
+    if col_name not in existing:
+        db.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {col_name} {col_type}"))
+        db.commit()
+
+
 def init_db():
     Base.metadata.create_all(bind=engine)
     db = SessionLocal()
     try:
-        if DATABASE_URL.startswith("sqlite"):
-            existing_cols = {
-                row[1] for row in db.execute(text("PRAGMA table_info(job_postings)")).fetchall()
-            }
-            if "org_id" not in existing_cols:
-                db.execute(text("ALTER TABLE job_postings ADD COLUMN org_id VARCHAR"))
-                db.commit()
-            profile_cols = {
-                row[1] for row in db.execute(text("PRAGMA table_info(candidate_profiles)")).fetchall()
-            }
-            for col_name in ("questions_json", "keywords_json", "vocab_json"):
-                if col_name not in profile_cols:
-                    db.execute(text(f"ALTER TABLE candidate_profiles ADD COLUMN {col_name} TEXT"))
+        # ── Schema migrations (both SQLite and PostgreSQL) ──
+        _safe_add_column(db, "job_postings", "org_id", "VARCHAR")
+        for col_name in ("questions_json", "keywords_json", "vocab_json"):
+            _safe_add_column(db, "candidate_profiles", col_name, "TEXT")
+
+        # ── Backfill orphaned postings with org_id ──
+        orphaned_postings = db.query(JobPosting).filter(
+            JobPosting.org_id.is_(None),
+            JobPosting.recruiter_email.isnot(None),
+        ).all()
+        for posting in orphaned_postings:
+            owner = db.query(User).filter(
+                func.lower(User.email) == (posting.recruiter_email or "").casefold(),
+                User.role == "recruiter",
+                User.org_id.isnot(None),
+            ).first()
+            if owner:
+                posting.org_id = owner.org_id
+        if orphaned_postings:
             db.commit()
-            orphaned_postings = db.query(JobPosting).filter(
-                JobPosting.org_id.is_(None),
-                JobPosting.recruiter_email.isnot(None),
-            ).all()
-            for posting in orphaned_postings:
-                owner = db.query(User).filter(
-                    func.lower(User.email) == (posting.recruiter_email or "").casefold(),
-                    User.role == "recruiter",
-                    User.org_id.isnot(None),
-                ).first()
-                if owner:
-                    posting.org_id = owner.org_id
-            if orphaned_postings:
-                db.commit()
+
+        # ── Seed default recruiter account ──
         if not db.query(User).filter_by(username="recruiter").first():
             _default_pw = os.getenv("RECRUITER_DEFAULT_PASSWORD", "admin123")
             db.add(User(
@@ -707,7 +733,11 @@ def create_candidate_account(profile_id: int) -> dict:
 
 
 def mark_invite_sent(profile_id: int):
-    """Call after n8n email webhook fires successfully."""
+    """Call after n8n email webhook fires successfully.
+
+    Also clears temp_password — the candidate received it via email,
+    so there's no reason to keep plaintext credentials in the DB.
+    """
     db = SessionLocal()
     try:
         profile = db.query(CandidateProfile).filter(
@@ -715,6 +745,7 @@ def mark_invite_sent(profile_id: int):
         ).first()
         if profile:
             profile.invite_sent_at = datetime.utcnow()
+            profile.temp_password = None   # security: clear plaintext password
             db.commit()
     finally:
         db.close()

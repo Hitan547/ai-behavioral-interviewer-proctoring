@@ -1,0 +1,98 @@
+# PsySense — Production Deployment (AWS EC2 / ECS)
+# Usage: docker-compose -f deploy/docker-compose.prod.yml up -d
+
+version: "3.8"
+
+services:
+  # ── PostgreSQL Database ────────────────────────────────────────────────
+  # For local testing of the prod stack. On AWS, use RDS instead.
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: psysense
+      POSTGRES_USER: psysense_user
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme_in_production}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U psysense_user -d psysense"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── PsySense Application (all services via supervisord) ─────────────
+  psysense:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8501:8501"   # Streamlit UI
+      - "8000:8000"   # Answer service API
+      - "8001:8001"   # Fusion service
+      - "8002:8002"   # Emotion service
+      - "8003:8003"   # Insight service
+      - "8004:8004"   # Engagement service
+    environment:
+      # Database — points to the postgres service above.
+      # On AWS: replace with your RDS endpoint.
+      DATABASE_URL: postgresql://psysense_user:${POSTGRES_PASSWORD:-changeme_in_production}@postgres:5432/psysense
+
+      # App
+      ENVIRONMENT: production
+      APP_BASE_URL: ${APP_BASE_URL:-https://your-domain.com}
+
+      # AI / Transcription
+      GROQ_API_KEY: ${GROQ_API_KEY}
+      GROQ_API_KEY_2: ${GROQ_API_KEY_2}
+      VOCAB_EXTRACTION_MODEL: ${VOCAB_EXTRACTION_MODEL:-llama-3.3-70b-versatile}
+
+      # Auth
+      RECRUITER_DEFAULT_PASSWORD: ${RECRUITER_DEFAULT_PASSWORD:-changeme_in_production}
+
+      # n8n Webhooks
+      N8N_RESULT_WEBHOOK: ${N8N_RESULT_WEBHOOK}
+      N8N_INVITE_WEBHOOK: ${N8N_INVITE_WEBHOOK}
+
+      # WebRTC TURN Server
+      WEBRTC_TURN_URLS: ${WEBRTC_TURN_URLS:-}
+      WEBRTC_TURN_USERNAME: ${WEBRTC_TURN_USERNAME:-}
+      WEBRTC_TURN_PASSWORD: ${WEBRTC_TURN_PASSWORD:-}
+
+      # Monitoring
+      SENTRY_DSN: ${SENTRY_DSN:-}
+
+      # Database pool (tuned for production)
+      DATABASE_POOL_SIZE: "10"
+      DATABASE_MAX_OVERFLOW: "20"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 180s
+      retries: 3
+
+  # ── Nginx Reverse Proxy (HTTPS termination) ─────────────────────────
+  # On AWS with ALB: remove this service — ALB handles SSL.
+  # This is for direct EC2 deployment with Let's Encrypt.
+  nginx:
+    image: nginx:alpine
+    restart: unless-stopped
+    depends_on:
+      - psysense
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./certbot/conf:/etc/letsencrypt:ro
+      - ./certbot/www:/var/www/certbot:ro
+
+volumes:
+  pgdata:

@@ -14,6 +14,7 @@ UI changes vs v3:
 Logic: UNCHANGED from v3.
 """
 
+import sentry_setup  # noqa: F401 — auto-initializes Sentry if SENTRY_DSN is set
 import streamlit as st
 import requests
 import time

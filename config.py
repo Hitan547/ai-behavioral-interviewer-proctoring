@@ -19,6 +19,9 @@ N8N_RESULT_WEBHOOK     = os.getenv("N8N_RESULT_WEBHOOK",     "http://localhost:5
 N8N_INVITE_WEBHOOK     = os.getenv("N8N_INVITE_WEBHOOK",     "https://hitan2004.app.n8n.cloud/webhook/candidate-invite")
 RECRUITER_DEFAULT_PASSWORD = os.getenv("RECRUITER_DEFAULT_PASSWORD", "admin123")
 DATABASE_URL           = os.getenv("DATABASE_URL",           "sqlite:///./psysense.db")
+DATABASE_POOL_SIZE     = int(os.getenv("DATABASE_POOL_SIZE",  "5"))
+DATABASE_MAX_OVERFLOW  = int(os.getenv("DATABASE_MAX_OVERFLOW", "10"))
+SENTRY_DSN             = os.getenv("SENTRY_DSN",             "")
 
 
 def _is_local_url(value: str) -> bool:
