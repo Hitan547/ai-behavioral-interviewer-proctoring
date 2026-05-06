@@ -31,108 +31,219 @@ PsySense is a **full-stack AI interview platform** that automates the entire beh
 | 🔒 **Enterprise Proctoring** | Tab switching detection, copy/paste blocking, fullscreen enforcement, multi-face detection |
 | 📊 **Recruiter Dashboard** | Analytics, PDF reports, candidate comparison, and hiring pipeline management |
 | 🧠 **Multimodal Fusion** | Combines cognitive (LLM), emotion (DistilBERT), and engagement (CV) scores |
-| 💳 **SaaS Billing** | Multi-tenant subscriptions with Stripe integration and usage quotas |
+| 💳 **SaaS Billing** | Multi-tenant subscriptions with Razorpay billing support and usage quotas |
 
 ---
 
-## 🏗️ System Architecture
+## Product Status
+
+PsySense AI is positioned as a **sellable MVP / pilot-ready SaaS product** for AI-assisted behavioral interview screening. The current codebase includes the recruiter workflow, candidate workflow, AI scoring services, proctoring signals, multi-tenant SaaS foundation, billing foundation, production configuration, and deployment assets.
+
+Recommended launch path:
+
+1. Keep the current Streamlit/Docker app for local demos and product validation.
+2. Use the new serverless implementation path for AWS.
+3. Test the first serverless vertical slice with internal users.
+4. Validate with 1-3 trusted recruiters or placement teams after serverless MVP approval.
+5. Move toward broader SaaS launch after pilot feedback.
+
+AWS production must follow the CEO-approved serverless-only rule. Do not create VPC, EC2, RDS, OpenSearch, SageMaker, ECS/EKS, NAT Gateway, Load Balancer, ElastiCache, or Redshift.
+
+PsySense should be positioned as **human-in-the-loop decision support**. The platform provides structured interview insights, scores, reports, and integrity signals for recruiter review. Final hiring decisions remain with the employer or recruiter.
+
+---
+
+## What Has Been Completed
+
+### Core Product Workflow
+
+- Recruiter signup/login and organization context.
+- Job posting creation with job description input.
+- Resume upload and parsing.
+- Resume-to-JD matching and candidate shortlisting support.
+- Candidate invite/login flow.
+- JD/resume-aware behavioral question generation.
+- Candidate interview flow with camera, microphone, and fullscreen setup.
+- Speech-to-text transcription and LLM-based scoring.
+- Recruiter dashboard with candidate comparison and analytics.
+- Candidate PDF report export.
+
+### AI and Evaluation
+
+- STAR-method answer scoring.
+- Six-dimensional behavioral scoring: clarity, relevance, STAR structure, specificity, communication, and job fit.
+- Multimodal score fusion using cognitive, emotion, and engagement signals.
+- Per-question breakdowns for recruiter review.
+- AI-generated recommendations and insight summaries.
+
+### Proctoring and Trust Signals
+
+- Tab-switch detection.
+- Copy/paste blocking and logging.
+- Fullscreen enforcement.
+- DevTools attempt detection.
+- Multiple-face detection.
+- Engagement and attention signals.
+- Weighted proctoring risk score.
+- Proctoring events included in recruiter review and reports.
+
+### SaaS and Commercial Foundation
+
+- Multi-tenant organization model using `org_id`.
+- Trial, Starter, Pro, and Enterprise plan structure.
+- Monthly usage quota tracking.
+- Billing UI and subscription event logs.
+- Razorpay payment order and webhook support.
+- API key and middleware foundation for future integrations.
+
+### Trust and Compliance Readiness Added
+
+The project now includes pilot-ready trust and policy documents:
+
+- `docs/PRIVACY_POLICY.md`
+- `docs/TERMS_OF_USE.md`
+- `docs/CANDIDATE_CONSENT.md`
+- `docs/DATA_RETENTION_POLICY.md`
+- `docs/AI_EVALUATION_DISCLAIMER.md`
+- `docs/CEO_SAAS_PROJECT_BRIEF.md`
+
+The app also includes AI decision-support disclaimers in:
+
+- Candidate interview start flow.
+- Recruiter dashboard.
+- Candidate detail page.
+- PDF reports.
+
+---
+
+## 🏗️ AWS Serverless Architecture
+
+This is the approved AWS production direction. It uses only CEO-approved serverless services and does not create VPC, EC2, RDS, OpenSearch, SageMaker, ECS/EKS, NAT Gateway, Load Balancer, ElastiCache, or Redshift.
 
 ```mermaid
 graph TB
-    subgraph "Frontend — Streamlit UI"
-        UI[/"🖥️ Interview UI<br/>demo_app.py"/]
-        RD[/"📊 Recruiter Dashboard<br/>recruiter_dashboard.py"/]
-        JD[/"📝 Job Posting Page<br/>recruiter_jd_page.py"/]
+    subgraph "Frontend"
+        AMP["Amplify Hosting<br/>Recruiter + Candidate Web App"]
     end
 
-    subgraph "Core Services — FastAPI Microservices"
-        AS["🎤 Answer Service<br/>:8000<br/>Whisper STT + LLaMA Scoring"]
-        FS["🔗 Fusion Service<br/>:8001<br/>Weighted Score Aggregation"]
-        ES["🧠 Emotion Service<br/>:8002<br/>DistilBERT Sentiment"]
-        IS["💡 Insight Service<br/>:8003<br/>Performance Analytics"]
-        ENG["📹 Engagement Service<br/>:8004<br/>OpenCV Face Detection"]
+    subgraph "Identity"
+        COG["Cognito<br/>Recruiter + Candidate Auth"]
     end
 
-    subgraph "Security & Proctoring"
-        PR["🔒 Proctoring Engine<br/>proctoring.py"]
-        PC["🛡️ Proctoring Client<br/>proctoring_client.py"]
+    subgraph "API Layer"
+        API["API Gateway HTTP API"]
+        LJOB["Lambda<br/>Jobs API"]
+        LCAND["Lambda<br/>Candidates API"]
+        LINT["Lambda<br/>Interview API"]
+        LREP["Lambda<br/>Reports API"]
     end
 
-    subgraph "Data Layer"
-        DB[("🗄️ PostgreSQL / SQLite<br/>SQLAlchemy ORM")]
-        SAAS["💳 SaaS Module<br/>Multi-tenant Billing"]
+    subgraph "Async Processing"
+        SQS["SQS Queues"]
+        SFN["Step Functions<br/>Prepare + Score Workflows"]
+        EVT["EventBridge<br/>Retention / Cleanup"]
     end
 
-    subgraph "External APIs"
-        GROQ["☁️ Groq Cloud<br/>Whisper + LLaMA 3.1"]
+    subgraph "Storage"
+        DDB["DynamoDB<br/>Organizations, Jobs, Candidates, Interviews"]
+        S3["S3<br/>Resumes, Reports, Artifacts"]
+    end
+
+    subgraph "Secrets, Logs, AI"
+        SSM["SSM Parameter Store<br/>Secrets and config names"]
+        CW["CloudWatch<br/>Logs, metrics, alarms"]
+        GROQ["Groq API<br/>LLM + STT for MVP"]
+        BED["Bedrock<br/>Optional future AI provider"]
         N8N["📧 n8n Webhooks<br/>Email Notifications"]
-        STRIPE["💰 Stripe<br/>Payment Processing"]
+        RAZOR["Razorpay<br/>Billing, later phase"]
+    end
+
+    AMP --> COG
+    AMP --> API
+    COG --> API
+    API --> LJOB & LCAND & LINT & LREP
+    LJOB & LCAND & LINT & LREP --> DDB
+    LCAND & LREP --> S3
+    LINT --> SQS
+    SQS --> SFN
+    SFN --> DDB
+    SFN --> S3
+    SFN --> GROQ
+    SFN -.future.-> BED
+    EVT --> SFN
+    LJOB & LCAND & LINT & LREP --> SSM
+    LJOB & LCAND & LINT & LREP --> CW
+    LINT --> N8N
+    LREP --> RAZOR
+```
+
+### Current Serverless MVP Slice
+
+The `serverless/` folder contains the first approved AWS slice:
+
+```text
+Cognito-authenticated recruiter
+  -> API Gateway
+  -> Jobs / Candidates / Prepare Interview Lambdas
+  -> Candidate Interview Lambda
+  -> Scoring API + Step Functions + Scoring Lambda
+  -> DynamoDB + S3
+  -> Groq via SSM-managed API key
+```
+
+Implemented:
+
+- `POST /jobs` creates a job posting.
+- `GET /jobs` lists job postings scoped by organization.
+- `POST /jobs/{jobId}/candidates` creates candidate metadata and returns an S3 presigned resume upload URL.
+- `GET /jobs/{jobId}/candidates` lists candidates scoped by organization and job.
+- `POST /jobs/{jobId}/candidates/{candidateId}/prepare-interview` reads the uploaded resume from S3, combines it with job/candidate metadata from DynamoDB, generates questions, and stores prepared interview data.
+- `GET /jobs/{jobId}/candidates/{candidateId}/interview` returns prepared questions for the candidate interview flow.
+- `POST /jobs/{jobId}/candidates/{candidateId}/interview` stores candidate answers, consent confirmation, and lightweight integrity signals.
+- `POST /jobs/{jobId}/candidates/{candidateId}/score` starts the Step Functions scoring workflow.
+- `GET /jobs/{jobId}/candidates/{candidateId}/result` returns the latest recruiter scoring result and a presigned PDF report download URL when generated.
+- SAM template scan passes with zero blocked AWS resource types.
+
+---
+
+## 🧪 Local Demo Architecture
+
+The existing Streamlit/FastAPI app remains the local demo and product-validation environment. It is not the AWS production deployment path.
+
+```mermaid
+graph TB
+    subgraph "Local Frontend"
+        UI[/"Interview UI<br/>demo_app.py"/]
+        RD[/"Recruiter Dashboard<br/>recruiter_dashboard.py"/]
+        JD[/"Job Posting Page<br/>recruiter_jd_page.py"/]
+    end
+
+    subgraph "Local FastAPI Services"
+        AS["Answer Service<br/>Whisper STT + LLaMA Scoring"]
+        FS["Fusion Service<br/>Weighted Score Aggregation"]
+        ES["Emotion Service<br/>DistilBERT Sentiment"]
+        IS["Insight Service<br/>Performance Analytics"]
+        ENG["Engagement Service<br/>OpenCV Face Detection"]
+    end
+
+    subgraph "Local Data Layer"
+        DB[("SQLite local DB<br/>SQLAlchemy ORM")]
+        SAAS["SaaS Module<br/>Organizations, usage, plans"]
+    end
+
+    subgraph "External Integrations"
+        GROQ_LOCAL["Groq API<br/>Whisper + LLaMA"]
+        N8N_LOCAL["n8n Webhooks<br/>Email Notifications"]
+        RAZOR_LOCAL["Razorpay<br/>Billing support"]
     end
 
     UI --> AS & FS & ES & IS & ENG
-    UI --> PR
     RD --> DB
     JD --> DB
-    AS --> GROQ
-    FS --> DB
-    ES --> DB
-    SAAS --> STRIPE
-    UI --> N8N
+    AS --> GROQ_LOCAL
+    UI --> N8N_LOCAL
     DB --> SAAS
-    PR --> PC
-```
-
----
-
-## ☁️ AWS Production Architecture
-
-```mermaid
-graph TB
-    subgraph "Internet"
-        USER["👤 Recruiter / Candidate<br/>Browser"]
-    end
-
-    subgraph "AWS Cloud — us-east-1"
-        subgraph "Networking"
-            ALB["⚖️ Application Load Balancer<br/>HTTPS Termination (ACM)"]
-        end
-
-        subgraph "Compute — EC2 / ECS"
-            subgraph "Docker Container"
-                NGINX["🔀 Nginx<br/>Reverse Proxy + WebSocket"]
-                ST["🖥️ Streamlit<br/>:8501"]
-                SV["⚙️ Supervisord<br/>Process Manager"]
-                MS1["Answer :8000"]
-                MS2["Fusion :8001"]
-                MS3["Emotion :8002"]
-                MS4["Insight :8003"]
-                MS5["Engagement :8004"]
-            end
-        end
-
-        subgraph "Database"
-            RDS[("🐘 RDS PostgreSQL<br/>db.t3.micro<br/>Multi-AZ Backup")]
-        end
-
-        subgraph "Storage"
-            S3["📦 S3 Bucket<br/>Resumes & Reports"]
-        end
-    end
-
-    subgraph "External Services"
-        GROQ2["☁️ Groq API<br/>LLaMA + Whisper"]
-        TURN["🔄 TURN Server<br/>metered.ca"]
-        SENTRY["🐛 Sentry<br/>Error Monitoring"]
-    end
-
-    USER -->|HTTPS| ALB
-    ALB --> NGINX
-    NGINX --> ST
-    SV --> MS1 & MS2 & MS3 & MS4 & MS5
-    ST --> RDS
-    MS1 --> GROQ2
-    USER -->|WebRTC| TURN
-    ST --> SENTRY
+    SAAS --> RAZOR_LOCAL
 ```
 
 ---
@@ -296,13 +407,96 @@ Or use the batch script:
 
 ### Docker Deployment
 
+Docker Compose is retained for local/dev validation of the existing app only. It is not the approved AWS production deployment path.
+
 ```bash
-# Build and run with Docker Compose
+# Local/dev only
 docker compose -f deploy/docker-compose.prod.yml up -d --build
 
-# Check logs
+# Check local/dev logs
 docker compose -f deploy/docker-compose.prod.yml logs -f
 ```
+
+---
+
+## AWS Serverless Deployment Requirements
+
+AWS production must use only approved serverless services:
+
+- Amplify
+- Cognito
+- API Gateway
+- Lambda
+- DynamoDB
+- S3
+- SQS
+- Step Functions
+- EventBridge
+- CloudWatch
+- SSM Parameter Store
+- Optional Bedrock
+- CloudFormation / AWS SAM
+
+Do not create VPCs, EC2, RDS, OpenSearch, SageMaker, ECS/EKS, NAT Gateways, Load Balancers, ElastiCache, or Redshift.
+
+### Current Serverless MVP
+
+The `serverless/` folder contains the first approved AWS path:
+
+- `serverless/template.yaml`: SAM template using approved serverless services.
+- `serverless/backend/handlers/jobs.py`: Jobs API Lambda handler.
+- `serverless/backend/handlers/candidates.py`: Candidate metadata and resume upload URL handler.
+- `serverless/backend/handlers/prepare_interview.py`: Resume-to-question preparation Lambda handler.
+- `serverless/backend/handlers/candidate_interview.py`: Candidate question delivery and answer submission handler.
+- `serverless/backend/handlers/scoring.py`: Recruiter scoring workflow/result API handler.
+- `serverless/backend/handlers/scoring_worker.py`: Step Functions worker Lambda that scores submitted interviews.
+- `serverless/backend/repositories/jobs_repository.py`: DynamoDB-backed jobs repository.
+- `serverless/backend/repositories/candidates_repository.py`: DynamoDB + S3 repository for candidate metadata and resume upload URLs.
+- `serverless/backend/repositories/interviews_repository.py`: DynamoDB + S3 repository for interview preparation.
+- `serverless/backend/repositories/candidate_interviews_repository.py`: DynamoDB repository for candidate interview delivery and submissions.
+- `serverless/backend/repositories/scoring_repository.py`: DynamoDB repository for submissions and scoring results.
+- `tests/test_serverless_jobs.py`, `tests/test_serverless_candidates.py`, `tests/test_serverless_prepare_interview.py`, `tests/test_serverless_candidate_interview.py`, and `tests/test_serverless_scoring.py`: serverless slice tests.
+
+Implemented first flow:
+
+1. Cognito-authenticated recruiter request.
+2. `POST /jobs` creates a job posting.
+3. Lambda writes the job to DynamoDB.
+4. `GET /jobs` lists jobs scoped by organization.
+5. `POST /jobs/{jobId}/candidates` stores candidate metadata and returns a presigned S3 resume upload URL.
+6. `GET /jobs/{jobId}/candidates` lists candidates scoped by organization and job.
+7. Recruiter uploads the candidate PDF resume to S3 using the presigned URL.
+8. `POST /jobs/{jobId}/candidates/{candidateId}/prepare-interview` reads resume bytes from S3, extracts resume text, generates five interview questions with keywords, and stores the prepared interview on the candidate record.
+9. `GET /jobs/{jobId}/candidates/{candidateId}/interview` returns prepared questions to the candidate flow.
+10. `POST /jobs/{jobId}/candidates/{candidateId}/interview` stores answers, consent confirmation, and tab/fullscreen/copy-paste/DevTools integrity signals.
+11. `POST /jobs/{jobId}/candidates/{candidateId}/score` starts the Step Functions scoring workflow.
+12. Scoring Lambda reads job, candidate, and latest submission data from DynamoDB, computes per-question scores, final score, recommendation, and integrity risk.
+13. Scoring Lambda generates a recruiter PDF report and saves it to S3.
+14. `GET /jobs/{jobId}/candidates/{candidateId}/result` returns the latest recruiter scoring result with a presigned PDF report download URL.
+
+### Production Secrets
+
+Production secrets should be stored in SSM Parameter Store and referenced by name. Do not commit real values.
+
+Required secret/config names for the serverless MVP and next phases:
+
+```env
+GROQ_API_KEY_PARAMETER_NAME=/psysense/dev/GROQ_API_KEY
+N8N_INVITE_WEBHOOK_PARAMETER_NAME=/psysense/dev/N8N_INVITE_WEBHOOK
+N8N_RESULT_WEBHOOK_PARAMETER_NAME=/psysense/dev/N8N_RESULT_WEBHOOK
+RAZORPAY_KEY_ID_PARAMETER_NAME=/psysense/dev/RAZORPAY_KEY_ID
+RAZORPAY_KEY_SECRET_PARAMETER_NAME=/psysense/dev/RAZORPAY_KEY_SECRET
+```
+
+### Deployment Guardrail
+
+Before any AWS deployment, validate the generated CloudFormation template and confirm it contains zero blocked services.
+
+The first serverless deployment must be reviewed and approved before any resources are created.
+
+See `docs/SAFE_AWS_DEV_DEPLOYMENT_CHECKLIST.md` for exact PowerShell validation and deployment commands.
+
+See `docs/SERVERLESS_FRONTEND_API_INTEGRATION_PLAN.md` for the Amplify/Cognito/API Gateway frontend migration plan.
 
 ---
 
@@ -338,14 +532,18 @@ psysense/
 │
 ├── saas/                       # Multi-tenant SaaS layer
 │   ├── saas_auth.py            # Org signup/login
-│   ├── saas_billing.py         # Stripe subscriptions
+│   ├── saas_billing.py         # Razorpay billing and plan UI
 │   ├── saas_db.py              # Organization & usage models
 │   └── saas_middleware.py      # Tenant isolation middleware
 │
-├── deploy/                     # Production deployment
-│   ├── docker-compose.prod.yml # Full production stack
-│   ├── nginx.conf              # HTTPS + WebSocket proxy
+├── deploy/                     # Legacy/local Docker deployment assets
+│   ├── docker-compose.prod.yml # Local Docker stack, not AWS production
+│   ├── nginx.conf              # Legacy reverse proxy config
 │   └── .env.production.template
+│
+├── serverless/                 # Approved AWS serverless MVP path
+│   ├── template.yaml           # SAM template with approved resources only
+│   └── backend/                # Lambda handlers and repositories
 │
 ├── Dockerfile                  # Multi-stage production build
 ├── supervisord.conf            # Multi-process orchestration
@@ -367,7 +565,11 @@ psysense/
 | `WEBRTC_TURN_USERNAME` | ⚠️ | TURN server username |
 | `WEBRTC_TURN_PASSWORD` | ⚠️ | TURN server credential |
 | `SENTRY_DSN` | ❌ | Sentry error monitoring DSN |
-| `STRIPE_API_KEY` | ❌ | Stripe API key for billing |
+| `RAZORPAY_KEY_ID` | ❌ | Razorpay public key for billing |
+| `RAZORPAY_KEY_SECRET` | ❌ | Razorpay secret key for billing |
+| `RAZORPAY_WEBHOOK_SECRET` | ❌ | Razorpay webhook verification secret |
+| `PASSWORD_RESET_SECRET` | ✅ | Secret used to sign password reset tokens |
+| `APP_BASE_URL` | ✅ | Public application URL in production |
 | `DATABASE_POOL_SIZE` | ❌ | PostgreSQL connection pool size (default: 5) |
 
 ---
@@ -398,14 +600,14 @@ psysense/
 
 | Layer | Technology |
 |-------|-----------|
-| **Frontend** | Streamlit, HTML/CSS, JavaScript |
-| **Backend** | FastAPI, Python 3.10+ |
+| **Frontend** | Streamlit for local demo; Amplify web app for AWS serverless path |
+| **Backend** | FastAPI for local demo; API Gateway + Lambda for AWS serverless path |
 | **AI/ML** | LLaMA 3.1 70B (Groq), Whisper Large V3, DistilBERT |
 | **Computer Vision** | OpenCV (face detection, engagement) |
-| **Database** | PostgreSQL (prod) / SQLite (dev), SQLAlchemy |
+| **Database** | SQLite local demo; DynamoDB for AWS serverless path |
 | **Audio** | WebRTC, PyAV, gTTS |
-| **Billing** | Stripe |
-| **Deployment** | Docker, Nginx, Supervisord, AWS (EC2 + RDS) |
+| **Billing** | Razorpay |
+| **Deployment** | Local Docker for demo; AWS serverless via SAM/CloudFormation |
 | **Monitoring** | Sentry |
 | **Email** | n8n webhooks |
 

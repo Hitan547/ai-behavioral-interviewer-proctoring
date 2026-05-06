@@ -1,5 +1,7 @@
 # PsySense AI — SaaS Product Readiness Assessment
 
+> **May 2026 deployment update:** This assessment predates the CEO serverless-only AWS rule. Treat EC2/RDS/Docker production deployment notes as historical/local-demo context only. The approved AWS path is now the serverless architecture documented in `docs/SERVERLESS_AWS_ARCHITECTURE.md` and `serverless/template.yaml`.
+
 **Assessment Date:** May 5, 2026  
 **Assessed By:** AI Code Review (Antigravity / Google DeepMind)  
 **Repository:** `anbunathanr/ai-behavioral-interviewer-proctoring`  
