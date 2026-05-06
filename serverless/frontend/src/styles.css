@@ -506,6 +506,184 @@ textarea {
   text-align: center;
 }
 
+/* ── Proctoring UI ──────────────────────────────────────────────────── */
+
+.proctoring-bar {
+  background: #f8fafb;
+  border: 1px solid #dfe4e8;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+  padding: 10px 14px;
+}
+
+.proctoring-status {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 1;
+}
+
+.proctoring-indicator {
+  align-items: center;
+  border-radius: 999px;
+  display: inline-flex;
+  font-size: 12px;
+  font-weight: 600;
+  gap: 6px;
+  padding: 5px 12px;
+}
+
+.proctoring-indicator.ok {
+  background: #d1fae5;
+  color: #065f46;
+}
+
+.proctoring-indicator.warning {
+  background: #fee2e2;
+  color: #991b1b;
+  animation: pulse-warning 1.5s ease-in-out infinite;
+}
+
+.proctoring-indicator.off {
+  background: #f3f4f6;
+  color: #6b7280;
+}
+
+@keyframes pulse-warning {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
+.proctoring-events {
+  color: #697780;
+  font-size: 12px;
+}
+
+.camera-preview {
+  flex-shrink: 0;
+  width: 120px;
+  height: 90px;
+  border-radius: 6px;
+  overflow: hidden;
+  border: 2px solid #dfe4e8;
+  background: #17202a;
+}
+
+.camera-preview canvas {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+/* ── Recruiter Score Dimensions ─────────────────────────────────────── */
+
+.score-dimensions {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(3, 1fr);
+  margin-top: 12px;
+}
+
+.dimension-card {
+  background: #f8fafb;
+  border: 1px solid #dfe4e8;
+  border-radius: 6px;
+  padding: 10px;
+  text-align: center;
+}
+
+.dimension-card .dim-score {
+  color: #146c63;
+  display: block;
+  font-size: 22px;
+  font-weight: 800;
+}
+
+.dimension-card .dim-label {
+  color: #697780;
+  font-size: 11px;
+  text-transform: capitalize;
+}
+
+.per-question-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.per-question-item {
+  background: #f8fafb;
+  border: 1px solid #dfe4e8;
+  border-radius: 8px;
+  padding: 14px;
+}
+
+.per-question-item h4 {
+  color: #17202a;
+  font-size: 14px;
+  margin: 0 0 6px;
+}
+
+.per-question-item p {
+  color: #697780;
+  font-size: 13px;
+  margin: 4px 0 0;
+}
+
+.verdict-pill {
+  border-radius: 999px;
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 3px 10px;
+}
+
+.verdict-pill.strong {
+  background: #d1fae5;
+  color: #065f46;
+}
+
+.verdict-pill.review {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.verdict-pill.weak {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.verdict-pill.missing {
+  background: #f3f4f6;
+  color: #6b7280;
+}
+
+.integrity-detail {
+  display: grid;
+  gap: 6px;
+  grid-template-columns: repeat(3, 1fr);
+  margin-top: 10px;
+}
+
+.integrity-detail > div {
+  background: #f8fafb;
+  border: 1px solid #dfe4e8;
+  border-radius: 6px;
+  font-size: 12px;
+  padding: 8px;
+  text-align: center;
+}
+
+.integrity-detail strong {
+  display: block;
+  font-size: 18px;
+  margin-bottom: 2px;
+}
+
 @media (max-width: 980px) {
   .shell {
     grid-template-columns: 1fr;
@@ -523,7 +701,18 @@ textarea {
   .device-check,
   .grid.two,
   .form-grid.inline,
-  .result {
+  .result,
+  .score-dimensions,
+  .integrity-detail {
     grid-template-columns: 1fr;
+  }
+
+  .proctoring-bar {
+    flex-direction: column;
+  }
+
+  .camera-preview {
+    width: 100%;
+    height: 180px;
   }
 }

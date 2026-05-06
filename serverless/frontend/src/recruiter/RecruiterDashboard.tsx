@@ -1,4 +1,4 @@
-import { Download, FileUp, Play, RefreshCw, Sparkles } from "lucide-react";
+import { Download, Eye, Play, RefreshCw, Sparkles } from "lucide-react";
 import { useMemo, useState } from "react";
 import { ApiClient } from "../api/client";
 import type { AuthSession } from "../auth/useAuthSession";
@@ -8,18 +8,64 @@ type Props = {
   auth: AuthSession;
 };
 
+type PerQuestion = {
+  questionIndex: number;
+  question: string;
+  answered: boolean;
+  score: number;
+  verdict: string;
+  summary: string;
+  method?: string;
+  dimensions?: {
+    clarity: number;
+    relevance: number;
+    starQuality: number;
+    specificity: number;
+    communication: number;
+    jobFit: number;
+  };
+  keyStrength?: string;
+  keyImprovement?: string;
+  recruiterVerdict?: string;
+};
+
+type IntegrityRisk = {
+  level: string;
+  scorePenalty: number;
+  tabSwitches: number;
+  fullscreenExits: number;
+  copyPasteAttempts: number;
+  devtoolsAttempts: number;
+  faceNotDetected?: number;
+  multipleFaces?: number;
+  eventCount: number;
+};
+
+type DetailedResult = ScoringResult & {
+  perQuestion?: PerQuestion[];
+  integrityRisk: IntegrityRisk;
+};
+
+function verdictClass(verdict: string): string {
+  if (verdict === "Strong") return "strong";
+  if (verdict === "Needs Review") return "review";
+  if (verdict === "Weak") return "weak";
+  return "missing";
+}
+
 export function RecruiterDashboard({ auth }: Props) {
   const api = useMemo(() => new ApiClient(auth), [auth]);
   const [jobs, setJobs] = useState<Job[]>([]);
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [selectedJobId, setSelectedJobId] = useState("");
   const [selectedCandidateId, setSelectedCandidateId] = useState("");
-  const [result, setResult] = useState<ScoringResult | null>(null);
+  const [result, setResult] = useState<DetailedResult | null>(null);
   const [busy, setBusy] = useState("");
   const [message, setMessage] = useState("");
   const [jobForm, setJobForm] = useState({ title: "", jdText: "", minPassScore: 60 });
   const [candidateForm, setCandidateForm] = useState({ name: "", email: "" });
   const [resumeFile, setResumeFile] = useState<File | null>(null);
+  const [showDetails, setShowDetails] = useState(false);
 
   async function run(label: string, action: () => Promise<void>) {
     setBusy(label);
@@ -49,6 +95,13 @@ export function RecruiterDashboard({ auth }: Props) {
     if (!selectedCandidateId && payload.candidates[0]) {
       setSelectedCandidateId(payload.candidates[0].candidateId);
     }
+  }
+
+  // Generate a candidate interview link
+  function candidateLink(): string {
+    if (!selectedJobId || !selectedCandidateId) return "";
+    const base = window.location.origin + window.location.pathname;
+    return `${base}?mode=candidate&jobId=${selectedJobId}&candidateId=${selectedCandidateId}`;
   }
 
   return (
@@ -109,7 +162,7 @@ export function RecruiterDashboard({ auth }: Props) {
           <input placeholder="Candidate name" value={candidateForm.name} onChange={(event) => setCandidateForm({ ...candidateForm, name: event.target.value })} />
           <input placeholder="Candidate email" value={candidateForm.email} onChange={(event) => setCandidateForm({ ...candidateForm, email: event.target.value })} />
           <label className="file-input">
-            <FileUp size={18} />
+            <span>📄</span>
             <input type="file" accept="application/pdf" onChange={(event) => setResumeFile(event.target.files?.[0] ?? null)} />
             {resumeFile?.name ?? "Resume PDF"}
           </label>
@@ -139,6 +192,16 @@ export function RecruiterDashboard({ auth }: Props) {
             </button>
           ))}
         </div>
+
+        {/* Candidate interview link */}
+        {selectedJobId && selectedCandidateId && (
+          <div style={{ marginTop: 12, fontSize: 12, color: "#697780" }}>
+            <strong>Interview link:</strong>{" "}
+            <a href={candidateLink()} target="_blank" rel="noopener noreferrer" style={{ color: "#146c63", wordBreak: "break-all" }}>
+              {candidateLink()}
+            </a>
+          </div>
+        )}
       </section>
 
       <section className="panel wide">
@@ -162,7 +225,7 @@ export function RecruiterDashboard({ auth }: Props) {
           </button>
           <button disabled={!selectedJobId || !selectedCandidateId} onClick={() => run("Load result", async () => {
             const payload = await api.getResult(selectedJobId, selectedCandidateId);
-            setResult(payload.result);
+            setResult(payload.result as DetailedResult);
           })}>
             <RefreshCw size={17} />
             Result
@@ -173,23 +236,103 @@ export function RecruiterDashboard({ auth }: Props) {
               PDF
             </a>
           )}
+          {result && (
+            <button onClick={() => setShowDetails(!showDetails)}>
+              <Eye size={17} />
+              {showDetails ? "Hide" : "Details"}
+            </button>
+          )}
         </div>
 
         {result && (
-          <div className="result">
-            <div>
-              <span className="metric">{result.finalScore}</span>
-              <p>Final score</p>
+          <>
+            {/* Summary cards */}
+            <div className="result">
+              <div>
+                <span className="metric">{result.finalScore}</span>
+                <p>Final score</p>
+              </div>
+              <div>
+                <span className="metric text">{result.recommendation}</span>
+                <p>Recommendation</p>
+              </div>
+              <div>
+                <span className="metric text">{result.integrityRisk.level}</span>
+                <p>Integrity risk</p>
+              </div>
             </div>
-            <div>
-              <span className="metric text">{result.recommendation}</span>
-              <p>Recommendation</p>
-            </div>
-            <div>
-              <span className="metric text">{result.integrityRisk.level}</span>
-              <p>Integrity risk</p>
-            </div>
-          </div>
+
+            {/* Integrity details */}
+            {showDetails && result.integrityRisk && (
+              <div style={{ marginTop: 16 }}>
+                <h4 style={{ margin: "0 0 6px", fontSize: 14 }}>Proctoring Signals</h4>
+                <div className="integrity-detail">
+                  <div>
+                    <strong>{result.integrityRisk.tabSwitches}</strong>
+                    Tab switches
+                  </div>
+                  <div>
+                    <strong>{result.integrityRisk.fullscreenExits}</strong>
+                    Fullscreen exits
+                  </div>
+                  <div>
+                    <strong>{result.integrityRisk.copyPasteAttempts}</strong>
+                    Copy/paste
+                  </div>
+                  <div>
+                    <strong>{result.integrityRisk.devtoolsAttempts}</strong>
+                    DevTools
+                  </div>
+                  <div>
+                    <strong>{result.integrityRisk.faceNotDetected ?? 0}</strong>
+                    Face absent
+                  </div>
+                  <div>
+                    <strong>{result.integrityRisk.multipleFaces ?? 0}</strong>
+                    Multiple faces
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Per-question breakdown */}
+            {showDetails && result.perQuestion && (
+              <div style={{ marginTop: 16 }}>
+                <h4 style={{ margin: "0 0 6px", fontSize: 14 }}>Per-Question Breakdown</h4>
+                <div className="per-question-list">
+                  {result.perQuestion.map((pq) => (
+                    <div key={pq.questionIndex} className="per-question-item">
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                        <h4>Q{pq.questionIndex + 1}: {pq.question}</h4>
+                        <span className={`verdict-pill ${verdictClass(pq.verdict)}`}>{pq.verdict}</span>
+                      </div>
+                      <div style={{ display: "flex", gap: 12, alignItems: "center", marginTop: 4 }}>
+                        <span style={{ fontSize: 22, fontWeight: 800, color: "#146c63" }}>{pq.score}</span>
+                        <span style={{ fontSize: 12, color: "#697780" }}>/ 100 • {pq.method === "llm" ? "AI Scored" : pq.method === "heuristic" ? "Heuristic" : "—"}</span>
+                      </div>
+                      {pq.summary && <p>{pq.summary}</p>}
+                      {pq.dimensions && (
+                        <div className="score-dimensions">
+                          {Object.entries(pq.dimensions).map(([key, val]) => (
+                            <div key={key} className="dimension-card">
+                              <span className="dim-score">{val as number}</span>
+                              <span className="dim-label">{key.replace(/([A-Z])/g, " $1").trim()}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {pq.keyStrength && pq.keyStrength !== "N/A" && (
+                        <p><strong>Strength:</strong> {pq.keyStrength}</p>
+                      )}
+                      {pq.keyImprovement && pq.keyImprovement !== "N/A" && (
+                        <p><strong>Improve:</strong> {pq.keyImprovement}</p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </>
         )}
       </section>
     </div>

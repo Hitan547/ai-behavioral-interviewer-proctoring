@@ -31,17 +31,35 @@ export type ScoringResult = {
   summary: string;
   integrityRisk: {
     level: string;
+    scorePenalty: number;
     tabSwitches: number;
     fullscreenExits: number;
     copyPasteAttempts: number;
     devtoolsAttempts: number;
+    faceNotDetected?: number;
+    multipleFaces?: number;
+    eventCount: number;
   };
   perQuestion: Array<{
     questionIndex: number;
     question: string;
+    answered: boolean;
     score: number;
     verdict: string;
     summary: string;
+    method?: string;
+    dimensions?: {
+      clarity: number;
+      relevance: number;
+      starQuality: number;
+      specificity: number;
+      communication: number;
+      jobFit: number;
+    };
+    keyStrength?: string;
+    keyImprovement?: string;
+    recruiterVerdict?: string;
+    starDetected?: boolean;
   }>;
   reportDownload?: {
     method: "GET";

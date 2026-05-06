@@ -21,15 +21,17 @@ def generate_report_pdf(
         f"Recommendation: {result.get('recommendation', 'Needs Review')}",
         f"Submission: {submission.get('submissionId', '')}",
         "",
-        "Integrity Summary",
+        "Integrity & Proctoring Summary",
     ]
     integrity = result.get("integrityRisk", {}) if isinstance(result.get("integrityRisk"), dict) else {}
     lines.extend([
-        f"Risk Level: {integrity.get('level', 'Low')}",
+        f"Risk Level: {integrity.get('level', 'Low')} (Penalty: -{integrity.get('scorePenalty', 0)} pts)",
         f"Tab Switches: {integrity.get('tabSwitches', 0)}",
         f"Fullscreen Exits: {integrity.get('fullscreenExits', 0)}",
         f"Copy/Paste Attempts: {integrity.get('copyPasteAttempts', 0)}",
         f"DevTools Attempts: {integrity.get('devtoolsAttempts', 0)}",
+        f"Face Not Detected: {integrity.get('faceNotDetected', 0)}",
+        f"Multiple Faces: {integrity.get('multipleFaces', 0)}",
         "",
         "Question Breakdown",
     ])
@@ -37,12 +39,23 @@ def generate_report_pdf(
     for item in result.get("perQuestion", [])[:10]:
         if not isinstance(item, dict):
             continue
+        method = item.get("method", "unknown")
+        verdict = item.get("recruiterVerdict") or item.get("verdict", "")
         lines.extend([
-            f"Q{int(item.get('questionIndex', 0)) + 1}: {item.get('score', 0)}/100 - {item.get('verdict', '')}",
+            f"Q{int(item.get('questionIndex', 0)) + 1}: {item.get('score', 0)}/100 - {verdict} ({method})",
             _wrap(f"Question: {item.get('question', '')}", 92),
             _wrap(f"Summary: {item.get('summary', '')}", 92),
-            "",
         ])
+        # Include LLM dimensions if available
+        dims = item.get("dimensions")
+        if isinstance(dims, dict):
+            dim_parts = [f"{k}:{v}" for k, v in dims.items()]
+            lines.append(f"  Dimensions: {', '.join(dim_parts)}")
+        if item.get("keyStrength") and item["keyStrength"] != "N/A":
+            lines.append(f"  Strength: {item['keyStrength']}")
+        if item.get("keyImprovement") and item["keyImprovement"] != "N/A":
+            lines.append(f"  Improve: {item['keyImprovement']}")
+        lines.append("")
 
     lines.extend([
         "Decision-Support Notice",

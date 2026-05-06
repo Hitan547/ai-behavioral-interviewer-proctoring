@@ -1,9 +1,10 @@
-import { CheckCircle2, Clock3, Mic, RotateCcw, Send, ShieldCheck, Square, UploadCloud, Video } from "lucide-react";
+import { CheckCircle2, Clock3, Eye, EyeOff, Mic, RotateCcw, Send, ShieldCheck, Square, UploadCloud, Video } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ApiClient } from "../api/client";
 import type { PreparedQuestion } from "../api/types";
 import type { AuthSession } from "../auth/useAuthSession";
 import { useIntegritySignals } from "./integritySignals";
+import { useProctoring } from "./useProctoring";
 import { useAudioRecorder } from "./useAudioRecorder";
 
 type Props = {
@@ -28,10 +29,15 @@ export function CandidateInterview({ auth }: Props) {
   const [answerAudioKeys, setAnswerAudioKeys] = useState<Record<number, string>>({});
   const [consentAccepted, setConsentAccepted] = useState(false);
   const [timeLeft, setTimeLeft] = useState(QUESTION_SECONDS);
-  const [deviceStatus, setDeviceStatus] = useState("Camera and microphone not checked.");
   const [message, setMessage] = useState("");
   const mediaStream = useRef<MediaStream | null>(null);
-  const integrity = useIntegritySignals(questionIndex);
+
+  // Proctoring: browser-side face detection
+  const proctoring = useProctoring(questionIndex);
+
+  // Integrity signals: merge browser events + proctoring events
+  const integrity = useIntegritySignals(questionIndex, proctoring.events);
+
   const audio = useAudioRecorder();
 
   const current = questions[questionIndex];
@@ -79,14 +85,11 @@ export function CandidateInterview({ auth }: Props) {
   async function checkDevices() {
     setMessage("");
     try {
-      mediaStream.current?.getTracks().forEach((track) => track.stop());
-      mediaStream.current = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
-      const audioReady = mediaStream.current.getAudioTracks().some((track) => track.readyState === "live");
-      const videoReady = mediaStream.current.getVideoTracks().some((track) => track.readyState === "live");
-      setDeviceStatus(`Ready: ${audioReady ? "microphone" : "no microphone"} / ${videoReady ? "camera" : "no camera"}`);
+      // Start proctoring camera
+      await proctoring.startCamera();
       setStep("interview");
+      setMessage("Camera active — proctoring enabled.");
     } catch (error) {
-      setDeviceStatus("Camera/microphone permission failed. You can continue with typed answers for this MVP.");
       setMessage(error instanceof Error ? error.message : String(error));
     }
   }
@@ -149,6 +152,7 @@ export function CandidateInterview({ auth }: Props) {
         })).filter((answer) => answer.answerText.trim()),
         integritySignals: integrity,
       });
+      proctoring.stopCamera();
       mediaStream.current?.getTracks().forEach((track) => track.stop());
       setStep("submitted");
       setMessage("Interview submitted successfully.");
@@ -162,7 +166,7 @@ export function CandidateInterview({ auth }: Props) {
       <div className="panel-title">
         <div>
           <h3>{candidateName || "Candidate Interview"}</h3>
-          <p>Typed-answer MVP for the AWS serverless flow.</p>
+          <p>AI-Proctored interview — browser-side face detection active.</p>
         </div>
         {message && <span className="status-pill">{message}</span>}
       </div>
@@ -192,11 +196,13 @@ export function CandidateInterview({ auth }: Props) {
           <ShieldCheck size={32} />
           <h3>Consent Required</h3>
           <p>
-            This interview uses AI-assisted analysis and collects lightweight browser integrity signals for recruiter review.
+            This interview uses <strong>AI-assisted proctoring</strong> with browser-based face detection,
+            integrity monitoring, and AI scoring. Your camera feed is processed locally in your browser —
+            no video is sent to any server.
           </p>
           <label className="consent">
             <input type="checkbox" checked={consentAccepted} onChange={(event) => setConsentAccepted(event.target.checked)} />
-            I understand and consent to the interview analysis and integrity signal collection.
+            I understand and consent to the AI-proctored interview analysis.
           </label>
           <button disabled={!consentAccepted} onClick={() => setStep("device-check")}>Continue</button>
         </div>
@@ -207,26 +213,59 @@ export function CandidateInterview({ auth }: Props) {
           <div className="device-card">
             <Video size={24} />
             <h3>Camera Check</h3>
-            <p>Allow camera access so the interview page can confirm your browser is ready.</p>
+            <p>Your camera will be used for face detection proctoring. Video stays in your browser — never uploaded.</p>
           </div>
           <div className="device-card">
             <Mic size={24} />
             <h3>Microphone Check</h3>
-            <p>Audio recording comes in the next slice. This check prepares the browser flow.</p>
+            <p>Optional: record voice answers. Audio is uploaded only when you click "Upload + transcribe".</p>
           </div>
-          <p className="device-status">{deviceStatus}</p>
+          <p className="device-status">
+            {proctoring.cameraActive
+              ? `✅ Camera active — ${proctoring.faceDetected ? "face detected" : "no face detected"}`
+              : "Camera not started yet."}
+          </p>
           <div className="actions">
-            <button onClick={checkDevices}>Check camera and microphone</button>
-            <button onClick={() => setStep("interview")}>Continue with typed answers</button>
+            <button onClick={checkDevices}>
+              <Video size={17} />
+              Start camera + proctoring
+            </button>
+            <button onClick={() => setStep("interview")}>Continue without camera</button>
           </div>
         </div>
       )}
 
       {step === "interview" && current && (
         <div className="question-workspace">
+          {/* Proctoring status bar */}
+          <div className="proctoring-bar">
+            <div className="proctoring-status">
+              {proctoring.cameraActive ? (
+                <span className={`proctoring-indicator ${proctoring.faceDetected ? "ok" : "warning"}`}>
+                  {proctoring.faceDetected ? <Eye size={14} /> : <EyeOff size={14} />}
+                  {proctoring.faceDetected
+                    ? proctoring.faceCount === 1
+                      ? "Face detected"
+                      : `${proctoring.faceCount} faces detected`
+                    : "No face detected"}
+                </span>
+              ) : (
+                <span className="proctoring-indicator off">Camera off</span>
+              )}
+              <span className="proctoring-events">{integrity.events.length} signal(s)</span>
+            </div>
+            {/* Camera preview */}
+            {proctoring.cameraActive && (
+              <div className="camera-preview">
+                <video ref={proctoring.videoRef} autoPlay muted playsInline style={{ display: "none" }} />
+                <canvas ref={proctoring.canvasRef} />
+              </div>
+            )}
+          </div>
+
           <div className="question-header">
             <span>Question {questionIndex + 1} of {questions.length}</span>
-            <span>{integrity.events.length} integrity event(s)</span>
+            <span>{answeredCount}/{questions.length} answered</span>
           </div>
           <div className="timer-row">
             <div>
@@ -317,8 +356,12 @@ export function CandidateInterview({ auth }: Props) {
               <p>Integrity events</p>
             </div>
             <div>
-              <span className="metric text">Done</span>
-              <p>Status</p>
+              <span className="metric text">
+                {proctoring.faceNotDetectedCount + proctoring.multipleFacesCount > 0
+                  ? `${proctoring.faceNotDetectedCount + proctoring.multipleFacesCount} flags`
+                  : "Clean"}
+              </span>
+              <p>Proctoring</p>
             </div>
           </div>
         </div>
