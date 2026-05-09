@@ -5,34 +5,40 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 import urllib.error
 import urllib.request
 from typing import Any
 
 
-def generate_questions_with_keywords(resume_text: str, jd_text: str = "") -> tuple[list[str], list[list[str]], dict[str, Any]]:
+def generate_questions_with_keywords(
+    resume_text: str,
+    jd_text: str = "",
+    seed_context: str = "",
+) -> tuple[list[str], list[list[str]], dict[str, Any]]:
     resume_text = (resume_text or "").strip()
     jd_text = (jd_text or "").strip()
+    generation_seed = _generation_seed(resume_text, jd_text, seed_context)
     if not resume_text and not jd_text:
         questions = _default_questions()
         return questions, [[] for _ in questions], _default_vocab()
 
-    fallback_questions, fallback_keywords = _contextual_fallback_questions(resume_text, jd_text)
+    fallback_questions, fallback_keywords = _contextual_fallback_questions(resume_text, jd_text, generation_seed)
     api_keys = _get_groq_api_keys()
     if not api_keys:
-        return fallback_questions, fallback_keywords, _compact_vocab(resume_text, jd_text, fallback_keywords)
+        return fallback_questions, fallback_keywords, _compact_vocab(resume_text, jd_text, fallback_keywords, generation_seed)
 
     for api_key in api_keys:
         try:
-            payload = _call_groq(api_key, _build_prompt(resume_text, jd_text))
+            payload = _call_groq(api_key, _build_prompt(resume_text, jd_text, generation_seed))
             questions, keywords = _parse_questions(payload)
             questions, keywords = _complete_questions(questions, keywords, fallback_questions, fallback_keywords)
-            questions, keywords = _diversify_generic_opening(questions, keywords, fallback_questions, fallback_keywords)
-            vocab = _compact_vocab(resume_text, jd_text, keywords)
+            questions, keywords = _diversify_generic_questions(questions, keywords, fallback_questions, fallback_keywords)
+            vocab = _compact_vocab(resume_text, jd_text, keywords, generation_seed)
             return questions, keywords, vocab
         except Exception:
             continue
-    return fallback_questions, fallback_keywords, _compact_vocab(resume_text, jd_text, fallback_keywords)
+    return fallback_questions, fallback_keywords, _compact_vocab(resume_text, jd_text, fallback_keywords, generation_seed)
 
 
 def _get_groq_api_keys() -> list[str]:
@@ -58,17 +64,25 @@ def _get_groq_api_keys() -> list[str]:
     return keys
 
 
-def _build_prompt(resume_text: str, jd_text: str) -> str:
+def _build_prompt(resume_text: str, jd_text: str, generation_seed: str) -> str:
     jd_block = f"\n=== JOB DESCRIPTION ===\n{jd_text[:2000]}\n" if jd_text else ""
+    focus_plan = _focus_plan(generation_seed)
     return (
         "You are a senior technical and behavioral interviewer preparing a personalized interview.\n\n"
         "=== CANDIDATE RESUME ===\n"
         f"{resume_text[:3000]}\n"
         f"{jd_block}"
+        f"Interview variation seed: {generation_seed}. Use it only to vary the question angle; do not mention it.\n"
+        f"This interview's focus plan: {focus_plan}.\n\n"
         "Generate exactly 5 distinct interview questions for this candidate"
         f"{' and role' if jd_text else ''}.\n"
-        "Use concrete resume details, JD responsibilities, and likely gaps. Avoid generic repeated openings like "
-        "\"walk us through your experience with designing and developing machine learning models\".\n"
+        "Use concrete resume details, JD responsibilities, and likely gaps. Do not reuse generic repeated question sets.\n"
+        "Avoid these exact or near-exact questions unless the wording is substantially more specific to the candidate:\n"
+        "- Can you walk us through your experience with designing and developing machine learning models for classification, regression, and NLP tasks?\n"
+        "- How do you approach building and maintaining data pipelines for model training and evaluation?\n"
+        "- Can you describe your experience with deploying ML models as REST APIs using FastAPI or Flask?\n"
+        "- How do you collaborate with product and engineering teams to integrate AI features into existing products?\n"
+        "- Can you explain your approach to monitoring model performance and retraining as needed?\n\n"
         "Question mix:\n"
         "1. One concrete project or achievement from the resume that maps to the JD.\n"
         "2. One JD-critical skill or responsibility, including how they handled it in practice.\n"
@@ -85,7 +99,8 @@ def _call_groq(api_key: str, prompt: str) -> str:
     body = json.dumps({
         "model": os.environ.get("QUESTION_GENERATION_MODEL", "llama-3.1-8b-instant"),
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.3,
+        "temperature": float(os.environ.get("QUESTION_GENERATION_TEMPERATURE", "0.72")),
+        "top_p": 0.9,
         "max_tokens": 1200,
     }).encode("utf-8")
     request = urllib.request.Request(
@@ -167,35 +182,53 @@ def _complete_questions(
     return completed_questions[:5], completed_keywords[:5]
 
 
-def _diversify_generic_opening(
+def _diversify_generic_questions(
     questions: list[str],
     keywords: list[list[str]],
     fallback_questions: list[str],
     fallback_keywords: list[list[str]],
 ) -> tuple[list[str], list[list[str]]]:
-    if not questions:
+    if not questions or not fallback_questions:
         return questions, keywords
-    opening = questions[0].lower()
+    diversified = list(questions)
+    diversified_keywords = list(keywords)
+    used = {_question_key(question) for question in diversified}
+    for index, question in enumerate(list(diversified)):
+        if not _is_generic_question(question):
+            continue
+        for fallback_index, fallback_question in enumerate(fallback_questions):
+            fallback_key = _question_key(fallback_question)
+            if fallback_key in used and fallback_key != _question_key(question):
+                continue
+            diversified[index] = fallback_question
+            if index < len(diversified_keywords):
+                diversified_keywords[index] = fallback_keywords[fallback_index] if fallback_index < len(fallback_keywords) else []
+            used.add(fallback_key)
+            break
+    return diversified, diversified_keywords
+
+
+def _is_generic_question(question: str) -> bool:
+    normalized = question.lower()
     generic_markers = (
         "designing and developing machine learning models",
         "classification, regression, and nlp",
-        "walk us through your experience with",
+        "walk us through your experience",
         "describe your experience with",
+        "building and maintaining data pipelines",
+        "deploying ml models as rest apis",
+        "using fastapi or flask",
+        "collaborate with product and engineering teams",
+        "monitoring model performance and retraining",
     )
-    if any(marker in opening for marker in generic_markers) and fallback_questions:
-        diversified = list(questions)
-        diversified_keywords = list(keywords)
-        diversified[0] = fallback_questions[0]
-        diversified_keywords[0] = fallback_keywords[0] if fallback_keywords else []
-        return diversified, diversified_keywords
-    return questions, keywords
+    return any(marker in normalized for marker in generic_markers)
 
 
 def _question_key(question: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", question.lower()).strip()
 
 
-def _compact_vocab(resume_text: str, jd_text: str, keywords: list[list[str]]) -> dict[str, Any]:
+def _compact_vocab(resume_text: str, jd_text: str, keywords: list[list[str]], generation_seed: str = "") -> dict[str, Any]:
     seen = set()
     terms = []
     for keyword_list in keywords:
@@ -212,10 +245,11 @@ def _compact_vocab(resume_text: str, jd_text: str, keywords: list[list[str]]) ->
             "resume": len(resume_text or ""),
             "jd": len(jd_text or ""),
         },
+        "questionGenerationSeed": generation_seed,
     }
 
 
-def _contextual_fallback_questions(resume_text: str, jd_text: str) -> tuple[list[str], list[list[str]]]:
+def _contextual_fallback_questions(resume_text: str, jd_text: str, generation_seed: str = "") -> tuple[list[str], list[list[str]]]:
     resume_terms = _extract_terms(resume_text)
     jd_terms = _extract_terms(jd_text)
     combined_terms = _dedupe_terms(resume_terms + jd_terms)
@@ -224,13 +258,35 @@ def _contextual_fallback_questions(resume_text: str, jd_text: str) -> tuple[list
     technical_terms = _join_terms(combined_terms[:4], "the role's technical stack")
     delivery_terms = _join_terms(combined_terms[2:6] or combined_terms[:4], "the solution")
 
-    questions = [
-        f"Your resume mentions {project_terms}. Walk me through one specific project where you used this and what measurable result you delivered.",
-        f"This role needs {role_terms}. Which part of your past work is closest to that requirement, and what would you need to ramp up on?",
-        f"Describe how you would design, validate, and deploy a production solution using {technical_terms}. What tradeoffs would you watch?",
-        "Tell me about a time you worked with product, engineering, or business stakeholders to turn a technical idea into a usable feature.",
-        f"Give an example of a difficult bug, model issue, data issue, or production problem involving {delivery_terms}. How did you find the root cause and prevent it later?",
+    variant = _seed_number(generation_seed)
+    question_banks = [
+        [
+            f"Pick one resume project involving {project_terms}. What problem did it solve, what was your exact ownership, and how did you measure success?",
+            f"Tell me about the most production-like work you did with {project_terms}. What broke, what did you change, and what was the result?",
+            f"Choose a project from your resume that best matches this role. How did {project_terms} influence the design and delivery decisions?",
+        ],
+        [
+            f"The JD emphasizes {role_terms}. Describe a past situation where you handled a similar responsibility, including one tradeoff you made.",
+            f"Where is your strongest evidence for {role_terms}, and where would you need ramp-up time if hired for this role?",
+            f"Imagine you joined this team next week and had to deliver work around {role_terms}. What would you reuse from your past experience?",
+        ],
+        [
+            f"Design a reliable production workflow using {technical_terms}. How would you validate inputs, monitor failures, and decide when to rollback?",
+            f"Suppose a feature using {technical_terms} suddenly starts giving poor results in production. How would you debug it end to end?",
+            f"Walk through the architecture choices you would make for {technical_terms}, including data flow, API boundaries, and operational risks.",
+        ],
+        [
+            "Tell me about a time you had to align product, engineering, or business stakeholders when the technical answer was not obvious.",
+            "Describe a disagreement you had about scope, quality, timeline, or architecture. How did you move the team toward a decision?",
+            "Give an example of when you had to explain a technical risk to a non-technical stakeholder and influence the next step.",
+        ],
+        [
+            f"Give an example of a difficult bug, model issue, data issue, or production problem involving {delivery_terms}. How did you find the root cause and prevent it later?",
+            f"Tell me about a time a solution involving {delivery_terms} did not work as expected. What signals told you it was failing?",
+            f"What is one gap in your experience for this role, and how would you close it while delivering work involving {delivery_terms}?",
+        ],
     ]
+    questions = [bank[(variant + index) % len(bank)] for index, bank in enumerate(question_banks)]
     keyword_groups = [
         resume_terms[:8],
         jd_terms[:8],
@@ -239,6 +295,31 @@ def _contextual_fallback_questions(resume_text: str, jd_text: str) -> tuple[list
         combined_terms[:8] or ["debugging", "root cause", "monitoring", "prevention"],
     ]
     return questions, keyword_groups
+
+
+def _generation_seed(resume_text: str, jd_text: str, seed_context: str = "") -> str:
+    raw = f"{seed_context}|{time.time_ns()}|{resume_text[:500]}|{jd_text[:500]}"
+    # A short stable-looking seed is enough to guide prompt diversity without exposing source text.
+    import hashlib
+    return hashlib.sha256(raw.encode("utf-8", errors="ignore")).hexdigest()[:12]
+
+
+def _seed_number(generation_seed: str) -> int:
+    try:
+        return int((generation_seed or "0")[:8], 16)
+    except ValueError:
+        return 0
+
+
+def _focus_plan(generation_seed: str) -> str:
+    plans = [
+        "project evidence, production failure, stakeholder alignment, measurable impact, learning gap",
+        "architecture tradeoffs, validation strategy, operational monitoring, ownership, role ramp-up",
+        "delivery under constraints, data quality, API boundaries, collaboration conflict, prevention steps",
+        "resume proof, JD gap, debugging depth, product integration, continuous improvement",
+        "business outcome, technical depth, deployment risk, communication, post-release monitoring",
+    ]
+    return plans[_seed_number(generation_seed) % len(plans)]
 
 
 def _extract_terms(text: str) -> list[str]:

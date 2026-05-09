@@ -126,7 +126,7 @@ def test_prepare_interview_reads_resume_generates_questions_and_updates_candidat
     monkeypatch.setattr(
         prepare_interview,
         "generate_questions_with_keywords",
-        lambda resume_text, jd_text="": (
+        lambda resume_text, jd_text="", seed_context="": (
             [
                 "How did you design the Python APIs?",
                 "How did you use AWS Lambda?",

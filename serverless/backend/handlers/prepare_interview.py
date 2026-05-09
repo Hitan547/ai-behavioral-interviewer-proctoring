@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import time
 from typing import Any
 
 from repositories.interviews_repository import InterviewsRepository
@@ -53,6 +54,7 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         questions, question_keywords, vocab = generate_questions_with_keywords(
             resume_text,
             jd_text=str(job.get("jdText", "")),
+            seed_context=f"{identity.org_id}:{job_id}:{candidate_id}:{int(time.time() * 1000)}",
         )
         prepared = repository.save_prepared_questions(
             org_id=identity.org_id,
