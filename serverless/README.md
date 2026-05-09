@@ -1,6 +1,6 @@
-# PsySense Serverless MVP
+# Talentryx AI Serverless MVP
 
-This folder contains the AWS serverless implementation path for PsySense.
+This folder contains the AWS serverless implementation path for Talentryx AI.
 
 It is intentionally separate from the current Streamlit/Docker app so the local demo remains stable.
 
@@ -56,3 +56,9 @@ python -m pytest tests/test_serverless_jobs.py tests/test_serverless_candidates.
 Before any deployment, generate/validate the template and inspect it for blocked services.
 
 No AWS deployment should happen without CEO approval.
+
+## Deployment Prep
+
+Use your own Groq key, n8n webhook, frontend URL, and recruiter email. CEO/admin is only needed for AWS IAM deployment permission and cleanup of failed stacks.
+
+See `DEPLOYMENT_CHECKLIST.md` for the exact SSM setup, fresh packaging, guardrail scan, changeset, and recruiter Cognito user commands.

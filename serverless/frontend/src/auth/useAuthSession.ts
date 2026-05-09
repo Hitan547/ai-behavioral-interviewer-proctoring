@@ -9,6 +9,9 @@ export type AuthSession = {
   orgId: string;
   role: string;
   username: string;
+  candidateJobId: string;
+  candidateId: string;
+  isDemoMode: boolean;
   setAccessToken: (value: string) => void;
   setIdToken: (value: string) => void;
   setApiBaseUrl: (value: string) => void;
@@ -17,7 +20,11 @@ export type AuthSession = {
   setOrgId: (value: string) => void;
   setRole: (value: string) => void;
   setUsername: (value: string) => void;
+  setCandidateJobId: (value: string) => void;
+  setCandidateId: (value: string) => void;
   clearSession: () => void;
+  enterDemoMode: () => void;
+  isSignedIn: () => boolean;
   authHeaders: () => HeadersInit;
 };
 
@@ -36,6 +43,9 @@ export function useAuthSession(): AuthSession {
   const [orgId, setOrgIdState] = useState(localStorage.getItem("psysense.orgId") || "");
   const [role, setRoleState] = useState(localStorage.getItem("psysense.role") || "recruiter");
   const [username, setUsernameState] = useState(localStorage.getItem("psysense.username") || "");
+  const [candidateJobId, setCandidateJobIdState] = useState(localStorage.getItem("psysense.candidateJobId") || "");
+  const [candidateId, setCandidateIdState] = useState(localStorage.getItem("psysense.candidateId") || "");
+  const [isDemoMode, setIsDemoMode] = useState(localStorage.getItem("psysense.demoMode") === "true");
 
   return useMemo(
     () => ({
@@ -47,6 +57,9 @@ export function useAuthSession(): AuthSession {
       orgId,
       role,
       username,
+      candidateJobId,
+      candidateId,
+      isDemoMode,
       setApiBaseUrl(value: string) {
         localStorage.setItem("psysense.apiBaseUrl", value.trim());
         setApiBaseUrlState(value.trim());
@@ -79,6 +92,14 @@ export function useAuthSession(): AuthSession {
         localStorage.setItem("psysense.username", value.trim());
         setUsernameState(value.trim());
       },
+      setCandidateJobId(value: string) {
+        localStorage.setItem("psysense.candidateJobId", value.trim());
+        setCandidateJobIdState(value.trim());
+      },
+      setCandidateId(value: string) {
+        localStorage.setItem("psysense.candidateId", value.trim());
+        setCandidateIdState(value.trim());
+      },
       clearSession() {
         [
           "psysense.accessToken",
@@ -86,12 +107,33 @@ export function useAuthSession(): AuthSession {
           "psysense.orgId",
           "psysense.role",
           "psysense.username",
+          "psysense.candidateJobId",
+          "psysense.candidateId",
+          "psysense.demoMode",
         ].forEach((key) => localStorage.removeItem(key));
         setAccessTokenState("");
         setIdTokenState("");
         setOrgIdState("");
         setRoleState("recruiter");
         setUsernameState("");
+        setCandidateJobIdState("");
+        setCandidateIdState("");
+        setIsDemoMode(false);
+      },
+      enterDemoMode() {
+        localStorage.setItem("psysense.demoMode", "true");
+        localStorage.setItem("psysense.username", "demo@talentryx.ai");
+        localStorage.setItem("psysense.orgId", "demo-org");
+        localStorage.setItem("psysense.role", "recruiter");
+        localStorage.setItem("psysense.accessToken", "demo-token");
+        setIsDemoMode(true);
+        setUsernameState("demo@talentryx.ai");
+        setOrgIdState("demo-org");
+        setRoleState("recruiter");
+        setAccessTokenState("demo-token");
+      },
+      isSignedIn() {
+        return Boolean(accessToken) || isDemoMode;
       },
       authHeaders() {
         return {
@@ -100,6 +142,6 @@ export function useAuthSession(): AuthSession {
         };
       },
     }),
-    [accessToken, apiBaseUrl, clientId, idToken, orgId, role, userPoolId, username],
+    [accessToken, apiBaseUrl, candidateId, candidateJobId, clientId, idToken, isDemoMode, orgId, role, userPoolId, username],
   );
 }

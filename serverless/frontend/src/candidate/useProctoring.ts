@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { RefObject } from "react";
 
 /**
  * Browser-side proctoring using MediaPipe Face Detection.
@@ -26,6 +27,15 @@ export type ProctoringState = {
   canvasRef: React.RefObject<HTMLCanvasElement | null>;
   startCamera: () => Promise<void>;
   stopCamera: () => void;
+  error: string;
+};
+
+export type FaceProctoringState = {
+  faceDetected: boolean;
+  faceCount: number;
+  events: ProctoringEvent[];
+  faceNotDetectedCount: number;
+  multipleFacesCount: number;
   error: string;
 };
 
@@ -234,6 +244,100 @@ export function useProctoring(questionIndex: number): ProctoringState {
     canvasRef,
     startCamera,
     stopCamera,
+    error,
+  };
+}
+
+export function useFaceProctoring(
+  videoRef: RefObject<HTMLVideoElement | null>,
+  active: boolean,
+  questionIndex: number,
+): FaceProctoringState {
+  const detectorRef = useRef<FaceDetectorInstance | null>(null);
+  const intervalRef = useRef<number>(0);
+  const countsRef = useRef({ faceNotDetected: 0, multipleFaces: 0 });
+
+  const [faceDetected, setFaceDetected] = useState(false);
+  const [faceCount, setFaceCount] = useState(0);
+  const [events, setEvents] = useState<ProctoringEvent[]>([]);
+  const [error, setError] = useState("");
+
+  const addEvent = useCallback(
+    (type: ProctoringEvent["type"], detail?: string) => {
+      countsRef.current = {
+        ...countsRef.current,
+        ...(type === "face_not_detected" ? { faceNotDetected: countsRef.current.faceNotDetected + 1 } : {}),
+        ...(type === "multiple_faces" ? { multipleFaces: countsRef.current.multipleFaces + 1 } : {}),
+      };
+      setEvents((prev) => [
+        ...prev,
+        { type, questionIndex, timestamp: new Date().toISOString(), detail },
+      ]);
+    },
+    [questionIndex],
+  );
+
+  const runDetection = useCallback(() => {
+    const video = videoRef.current;
+    const detector = detectorRef.current;
+    if (!active || !video || !detector || video.readyState < 2) return;
+
+    try {
+      const result = detector.detectForVideo(video, performance.now());
+      const count = result.detections.length;
+      setFaceCount(count);
+
+      if (count === 0) {
+        setFaceDetected(false);
+        addEvent("face_not_detected");
+      } else if (count > 1) {
+        setFaceDetected(true);
+        addEvent("multiple_faces", `${count} faces detected`);
+      } else {
+        setFaceDetected(true);
+      }
+    } catch {
+      // Some frames are not usable by MediaPipe; the next interval can recover.
+    }
+  }, [active, addEvent, videoRef]);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function start() {
+      if (!active) return;
+      setError("");
+      if (!detectorRef.current) {
+        detectorRef.current = await loadFaceDetector();
+      }
+      if (cancelled) return;
+      if (!detectorRef.current) {
+        setError("Face detection unavailable in this browser.");
+        return;
+      }
+      runDetection();
+      intervalRef.current = window.setInterval(runDetection, DETECTION_INTERVAL_MS);
+    }
+
+    void start();
+    return () => {
+      cancelled = true;
+      if (intervalRef.current) {
+        window.clearInterval(intervalRef.current);
+        intervalRef.current = 0;
+      }
+    };
+  }, [active, runDetection]);
+
+  useEffect(() => {
+    return () => detectorRef.current?.close();
+  }, []);
+
+  return {
+    faceDetected,
+    faceCount,
+    events,
+    faceNotDetectedCount: countsRef.current.faceNotDetected,
+    multipleFacesCount: countsRef.current.multipleFaces,
     error,
   };
 }

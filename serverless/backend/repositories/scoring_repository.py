@@ -81,8 +81,11 @@ class ScoringRepository:
             "jobId": job_id,
             "candidateId": candidate_id,
             "submissionId": submission_id,
+            "baseScore": result.get("baseScore", result["finalScore"]),
             "finalScore": result["finalScore"],
             "recommendation": result["recommendation"],
+            "assessmentStatus": result.get("assessmentStatus", "Below Threshold"),
+            "minPassScore": result.get("minPassScore"),
             "integrityRisk": result["integrityRisk"],
             "perQuestion": result["perQuestion"],
             "summary": result["summary"],
@@ -96,12 +99,18 @@ class ScoringRepository:
             Key={"pk": _job_candidate_pk(org_id, job_id), "sk": _candidate_sk(candidate_id)},
             UpdateExpression=(
                 "SET interviewStatus = :status, latestResultScore = :score, "
-                "latestRecommendation = :recommendation, latestResultAt = :resultAt, updatedAt = :updatedAt"
+                "latestRecommendation = :recommendation, latestAssessmentStatus = :assessmentStatus, "
+                "latestIntegrityRiskLevel = :riskLevel, latestIntegrityRiskScore = :riskScore, "
+                "latestIntegrityPenalty = :riskPenalty, latestResultAt = :resultAt, updatedAt = :updatedAt"
             ),
             ExpressionAttributeValues={
                 ":status": "Scored",
                 ":score": result["finalScore"],
                 ":recommendation": result["recommendation"],
+                ":assessmentStatus": result.get("assessmentStatus", "Below Threshold"),
+                ":riskLevel": _risk_value(result.get("integrityRisk"), "level", "Low"),
+                ":riskScore": _risk_value(result.get("integrityRisk"), "riskScore", 0),
+                ":riskPenalty": _risk_value(result.get("integrityRisk"), "scorePenalty", 0),
                 ":resultAt": now,
                 ":updatedAt": now,
             },
@@ -140,6 +149,20 @@ class ScoringRepository:
             UpdateExpression=(
                 "SET reportS3Bucket = :bucket, reportS3Key = :key, "
                 "reportContentType = :contentType, reportGeneratedAt = :generatedAt"
+            ),
+            ExpressionAttributeValues={
+                ":bucket": self.artifact_bucket,
+                ":key": report_key,
+                ":contentType": "application/pdf",
+                ":generatedAt": _utc_epoch_seconds(),
+            },
+            ConditionExpression="attribute_exists(pk) AND attribute_exists(sk)",
+        )
+        self.table.update_item(
+            Key={"pk": _job_candidate_pk(org_id, job_id), "sk": _candidate_sk(candidate_id)},
+            UpdateExpression=(
+                "SET latestReportS3Bucket = :bucket, latestReportS3Key = :key, "
+                "latestReportContentType = :contentType, latestReportGeneratedAt = :generatedAt"
             ),
             ExpressionAttributeValues={
                 ":bucket": self.artifact_bucket,
@@ -206,8 +229,11 @@ def _public_result(item: dict[str, Any]) -> dict[str, Any]:
         "jobId": item["jobId"],
         "candidateId": item["candidateId"],
         "submissionId": item.get("submissionId"),
+        "baseScore": item.get("baseScore", item.get("finalScore", 0)),
         "finalScore": item.get("finalScore", 0),
         "recommendation": item.get("recommendation", "Needs Review"),
+        "assessmentStatus": item.get("assessmentStatus", "Below Threshold"),
+        "minPassScore": item.get("minPassScore"),
         "integrityRisk": item.get("integrityRisk", {}),
         "perQuestion": item.get("perQuestion", []),
         "summary": item.get("summary", ""),
@@ -217,3 +243,9 @@ def _public_result(item: dict[str, Any]) -> dict[str, Any]:
         "reportGeneratedAt": item.get("reportGeneratedAt"),
         "createdAt": item.get("createdAt"),
     }
+
+
+def _risk_value(integrity_risk: Any, key: str, default: Any) -> Any:
+    if isinstance(integrity_risk, dict):
+        return integrity_risk.get(key, default)
+    return default

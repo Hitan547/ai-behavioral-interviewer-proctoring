@@ -1,2 +1,1 @@
-"""Lambda handler package for the PsySense serverless MVP."""
-
+"""Lambda handler package for the Talentryx AI serverless MVP."""

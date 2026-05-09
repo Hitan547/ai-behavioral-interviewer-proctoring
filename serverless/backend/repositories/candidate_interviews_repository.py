@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import time
+from decimal import Decimal
 from typing import Any
 
 
@@ -37,6 +38,24 @@ class CandidateInterviewsRepository:
         )
         return response.get("Item")
 
+    def find_candidate_by_session_token(self, *, job_id: str, candidate_id: str, token: str) -> dict[str, Any] | None:
+        if not token:
+            return None
+        scan_kwargs: dict[str, Any] = {}
+        while True:
+            response = self.table.scan(**scan_kwargs)
+            for item in response.get("Items", []):
+                if (
+                    str(item.get("entityType", "")) == "CandidateProfile"
+                    and str(item.get("jobId", "")) == job_id
+                    and str(item.get("candidateId", "")) == candidate_id
+                    and str(item.get("candidateSessionToken", "")) == token
+                ):
+                    return item
+            if "LastEvaluatedKey" not in response:
+                return None
+            scan_kwargs["ExclusiveStartKey"] = response["LastEvaluatedKey"]
+
     def get_prepared_interview(self, org_id: str, job_id: str, candidate_id: str) -> dict[str, Any] | None:
         candidate = self.get_candidate(org_id, job_id, candidate_id)
         if not candidate:
@@ -66,6 +85,25 @@ class CandidateInterviewsRepository:
             ],
             "preparedAt": candidate.get("preparedAt"),
         }
+
+    def mark_interview_started(self, org_id: str, job_id: str, candidate_id: str) -> None:
+        now = _utc_epoch_seconds()
+        self.table.update_item(
+            Key={
+                "pk": _job_candidate_pk(org_id, job_id),
+                "sk": _candidate_sk(candidate_id),
+            },
+            UpdateExpression=(
+                "SET interviewStatus = :status, startedAt = if_not_exists(startedAt, :startedAt), "
+                "updatedAt = :updatedAt"
+            ),
+            ExpressionAttributeValues={
+                ":status": "In Progress",
+                ":startedAt": now,
+                ":updatedAt": now,
+            },
+            ConditionExpression="attribute_exists(pk) AND attribute_exists(sk)",
+        )
 
     def save_submission(
         self,
@@ -106,7 +144,8 @@ class CandidateInterviewsRepository:
             },
             UpdateExpression=(
                 "SET interviewStatus = :status, latestSubmissionId = :submissionId, "
-                "submittedAt = :submittedAt, updatedAt = :updatedAt"
+                "submittedAt = :submittedAt, updatedAt = :updatedAt "
+                "REMOVE candidateSessionToken, candidateSessionExpiresAt"
             ),
             ExpressionAttributeValues={
                 ":status": "Interview Submitted",
@@ -217,13 +256,37 @@ def _utc_epoch_seconds() -> int:
 def _normalize_integrity_signals(signals: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(signals, dict):
         signals = {}
+    tab_switches = _non_negative_int(signals.get("tabSwitches", signals.get("tab_switches", 0)))
+    fullscreen_exits = _non_negative_int(signals.get("fullscreenExits", signals.get("fullscreen_exits", 0)))
+    copy_paste_attempts = _non_negative_int(
+        signals.get("copyPasteAttempts", signals.get("copy_paste_attempts", 0))
+    )
+    devtools_attempts = _non_negative_int(signals.get("devtoolsAttempts", signals.get("devtools_attempts", 0)))
+    screen_count = max(1, _non_negative_int(signals.get("screenCount", signals.get("screen_count", 1))))
+    face_not_detected = _non_negative_int(signals.get("faceNotDetected", signals.get("face_not_detected", 0)))
+    multiple_faces = _non_negative_int(signals.get("multipleFaces", signals.get("multiple_faces", 0)))
+    risk_score = (
+        tab_switches * 2
+        + copy_paste_attempts * 5
+        + fullscreen_exits * 4
+        + devtools_attempts * 8
+        + multiple_faces * 6
+        + max(0, screen_count - 1) * 3
+    )
     return {
-        "tabSwitches": _non_negative_int(signals.get("tabSwitches", signals.get("tab_switches", 0))),
-        "fullscreenExits": _non_negative_int(signals.get("fullscreenExits", signals.get("fullscreen_exits", 0))),
-        "copyPasteAttempts": _non_negative_int(
-            signals.get("copyPasteAttempts", signals.get("copy_paste_attempts", 0))
+        "tabSwitches": tab_switches,
+        "fullscreenExits": fullscreen_exits,
+        "copyPasteAttempts": copy_paste_attempts,
+        "devtoolsAttempts": devtools_attempts,
+        "screenCount": screen_count,
+        "totalTimeAwaySeconds": _non_negative_float(
+            signals.get("totalTimeAwaySeconds", signals.get("total_time_away_seconds", 0))
         ),
-        "devtoolsAttempts": _non_negative_int(signals.get("devtoolsAttempts", signals.get("devtools_attempts", 0))),
+        "faceNotDetected": face_not_detected,
+        "multipleFaces": multiple_faces,
+        "riskScore": risk_score,
+        "riskLevel": _risk_level(risk_score),
+        "flags": _compact_strings(signals.get("flags", []), limit=20, length=160),
         "events": _compact_events(signals.get("events", [])),
     }
 
@@ -234,6 +297,30 @@ def _non_negative_int(value: Any) -> int:
     except (TypeError, ValueError):
         return 0
     return max(parsed, 0)
+
+
+def _non_negative_float(value: Any) -> Decimal:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return Decimal("0")
+    return Decimal(str(round(max(parsed, 0.0), 1)))
+
+
+def _risk_level(score: int) -> str:
+    if score >= 40:
+        return "Critical"
+    if score >= 25:
+        return "High"
+    if score >= 10:
+        return "Medium"
+    return "Low"
+
+
+def _compact_strings(values: Any, *, limit: int, length: int) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    return [str(value)[:length] for value in values[:limit] if str(value).strip()]
 
 
 def _compact_events(events: Any) -> list[dict[str, Any]]:
@@ -247,6 +334,7 @@ def _compact_events(events: Any) -> list[dict[str, Any]]:
             "type": str(event.get("type", ""))[:80],
             "questionIndex": _non_negative_int(event.get("questionIndex", event.get("question_index", 0))),
             "timestamp": str(event.get("timestamp", ""))[:80],
+            "detail": str(event.get("detail", ""))[:160],
         })
     return compacted
 

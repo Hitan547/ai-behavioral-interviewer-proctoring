@@ -41,6 +41,9 @@ class CandidatesRepository:
         email: str,
         resume_filename: str,
         resume_content_type: str,
+        college_name: str | None = None,
+        department: str | None = None,
+        graduation_year: str | None = None,
     ) -> dict[str, Any]:
         now = _utc_epoch_seconds()
         candidate_id = str(uuid.uuid4())
@@ -59,10 +62,17 @@ class CandidatesRepository:
             "resumeS3Bucket": self.artifact_bucket,
             "resumeS3Key": resume_key,
             "interviewStatus": "Resume Upload Pending",
+            "shortlisted": False,
             "createdBy": recruiter_id,
             "createdAt": now,
             "updatedAt": now,
         }
+        _put_optional_source_fields(
+            item,
+            college_name=college_name,
+            department=department,
+            graduation_year=graduation_year,
+        )
         self.table.put_item(
             Item=item,
             ConditionExpression="attribute_not_exists(pk) AND attribute_not_exists(sk)",
@@ -95,6 +105,64 @@ class CandidatesRepository:
             ScanIndexForward=False,
         )
         return [_public_candidate(item) for item in response.get("Items", [])]
+
+    def update_candidate(
+        self,
+        *,
+        org_id: str,
+        job_id: str,
+        candidate_id: str,
+        name: str | None = None,
+        email: str | None = None,
+        college_name: str | None = None,
+        department: str | None = None,
+        graduation_year: str | None = None,
+        shortlisted: bool | None = None,
+    ) -> dict[str, Any] | None:
+        now = _utc_epoch_seconds()
+        update_parts = ["updatedAt = :updatedAt"]
+        values: dict[str, Any] = {":updatedAt": now}
+        names: dict[str, str] = {}
+
+        if name is not None:
+            update_parts.append("#name = :name")
+            names["#name"] = "name"
+            values[":name"] = name
+        if email is not None:
+            update_parts.append("email = :email")
+            values[":email"] = email
+        if college_name is not None:
+            update_parts.append("collegeName = :collegeName")
+            values[":collegeName"] = college_name
+        if department is not None:
+            update_parts.append("department = :department")
+            values[":department"] = department
+        if graduation_year is not None:
+            update_parts.append("graduationYear = :graduationYear")
+            values[":graduationYear"] = graduation_year
+        if shortlisted is not None:
+            update_parts.append("shortlisted = :shortlisted")
+            values[":shortlisted"] = shortlisted
+            if shortlisted:
+                update_parts.append("shortlistedAt = :shortlistedAt")
+                values[":shortlistedAt"] = now
+            else:
+                update_parts.append("shortlistedAt = :shortlistedAt")
+                values[":shortlistedAt"] = 0
+
+        response = self.table.update_item(
+            Key={
+                "pk": _job_candidate_pk(org_id, job_id),
+                "sk": _candidate_sk(candidate_id),
+            },
+            UpdateExpression="SET " + ", ".join(update_parts),
+            ExpressionAttributeValues=values,
+            **({"ExpressionAttributeNames": names} if names else {}),
+            ConditionExpression="attribute_exists(pk) AND attribute_exists(sk)",
+            ReturnValues="ALL_NEW",
+        )
+        item = response.get("Attributes")
+        return _public_candidate(item) if item else None
 
     def create_resume_upload_url(self, *, resume_key: str, content_type: str) -> str:
         return self.s3_client.generate_presigned_url(
@@ -132,6 +200,21 @@ def _safe_filename(filename: str) -> str:
     return base or "resume.pdf"
 
 
+def _put_optional_source_fields(
+    item: dict[str, Any],
+    *,
+    college_name: str | None,
+    department: str | None,
+    graduation_year: str | None,
+) -> None:
+    if college_name:
+        item["collegeName"] = college_name
+    if department:
+        item["department"] = department
+    if graduation_year:
+        item["graduationYear"] = graduation_year
+
+
 def _public_candidate(item: dict[str, Any]) -> dict[str, Any]:
     return {
         "orgId": item["orgId"],
@@ -139,11 +222,31 @@ def _public_candidate(item: dict[str, Any]) -> dict[str, Any]:
         "candidateId": item["candidateId"],
         "name": item["name"],
         "email": item["email"],
+        "collegeName": item.get("collegeName"),
+        "department": item.get("department"),
+        "graduationYear": item.get("graduationYear"),
         "resumeFilename": item.get("resumeFilename"),
         "resumeS3Key": item.get("resumeS3Key"),
+        "matchScore": item.get("matchScore"),
+        "matchReason": item.get("matchReason"),
+        "shortlisted": bool(item.get("shortlisted", False)),
+        "shortlistedAt": item.get("shortlistedAt"),
+        "inviteSentAt": item.get("inviteSentAt"),
         "interviewStatus": item.get("interviewStatus", "Resume Upload Pending"),
+        "submittedAt": item.get("submittedAt"),
+        "startedAt": item.get("startedAt"),
+        "latestSubmissionId": item.get("latestSubmissionId"),
+        "latestResultScore": item.get("latestResultScore"),
+        "latestRecommendation": item.get("latestRecommendation"),
+        "latestAssessmentStatus": item.get("latestAssessmentStatus"),
+        "latestIntegrityRiskLevel": item.get("latestIntegrityRiskLevel"),
+        "latestIntegrityRiskScore": item.get("latestIntegrityRiskScore"),
+        "latestIntegrityPenalty": item.get("latestIntegrityPenalty"),
+        "latestResultAt": item.get("latestResultAt"),
+        "latestReportGeneratedAt": item.get("latestReportGeneratedAt"),
+        "retestCount": item.get("retestCount"),
+        "lastRetestAt": item.get("lastRetestAt"),
         "createdBy": item.get("createdBy"),
         "createdAt": item.get("createdAt"),
         "updatedAt": item.get("updatedAt"),
     }
-

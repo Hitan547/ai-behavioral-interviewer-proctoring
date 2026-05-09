@@ -97,26 +97,31 @@ def _build_user_prompt(question: str, answer: str, jd_text: str) -> str:
     )
 
 
-def _get_groq_api_key() -> str:
+def _get_groq_api_keys() -> list[str]:
     """Resolve Groq API key from env or SSM Parameter Store."""
-    env_key = os.environ.get("GROQ_API_KEY") or os.environ.get("GROQ_API_KEY_2")
-    if env_key:
-        return env_key.strip()
+    keys: list[str] = []
+    for env_name in ("GROQ_API_KEY", "GROQ_API_KEY_2"):
+        env_key = os.environ.get(env_name, "").strip()
+        if env_key and env_key not in keys:
+            keys.append(env_key)
     parameter_name = os.environ.get("GROQ_API_KEY_PARAMETER_NAME", "").strip()
     if not parameter_name:
-        return ""
+        return keys
     try:
         import boto3
         response = boto3.client("ssm").get_parameter(Name=parameter_name, WithDecryption=True)
-        return str(response.get("Parameter", {}).get("Value", "")).strip()
+        ssm_key = str(response.get("Parameter", {}).get("Value", "")).strip()
+        if ssm_key and ssm_key not in keys:
+            keys.append(ssm_key)
     except Exception:
-        return ""
+        return keys
+    return keys
 
 
 def _call_groq_scoring(question: str, answer: str, jd_text: str) -> dict[str, Any] | None:
     """Call Groq LLM to score an answer. Returns parsed dict or None on failure."""
-    api_key = _get_groq_api_key()
-    if not api_key:
+    api_keys = _get_groq_api_keys()
+    if not api_keys:
         return None
 
     user_prompt = _build_user_prompt(question, answer, jd_text)
@@ -130,25 +135,29 @@ def _call_groq_scoring(question: str, answer: str, jd_text: str) -> dict[str, An
         "max_tokens": 512,
     }).encode("utf-8")
 
-    request = urllib.request.Request(
-        "https://api.groq.com/openai/v1/chat/completions",
-        data=body,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
+    for api_key in api_keys:
+        request = urllib.request.Request(
+            "https://api.groq.com/openai/v1/chat/completions",
+            data=body,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "User-Agent": "TalentryxAIServerless/1.0",
+            },
+            method="POST",
+        )
 
-    try:
-        with urllib.request.urlopen(request, timeout=25) as response:
-            data = json.loads(response.read().decode("utf-8"))
-        raw = str(data["choices"][0]["message"]["content"])
-        cleaned = re.sub(r"```json|```", "", raw).strip()
-        scores = json.loads(cleaned)
-        return _validate_llm_scores(scores)
-    except Exception:
-        return None
+        try:
+            with urllib.request.urlopen(request, timeout=25) as response:
+                data = json.loads(response.read().decode("utf-8"))
+            raw = str(data["choices"][0]["message"]["content"])
+            cleaned = re.sub(r"```json|```", "", raw).strip()
+            scores = json.loads(cleaned)
+            return _validate_llm_scores(scores)
+        except Exception:
+            continue
+    return None
 
 
 def _validate_llm_scores(scores: dict[str, Any]) -> dict[str, Any]:
@@ -246,14 +255,19 @@ def score_interview(
     integrity_risk = summarize_integrity_risk(submission.get("integritySignals", {}))
     penalty = integrity_risk["scorePenalty"]
     final_score = max(0, min(100, base_score - penalty))
-    recommendation = _recommendation(final_score, integrity_risk["level"])
+    min_pass_score = _bounded_int(job.get("minPassScore", job.get("min_pass_score", 60)), 60, 0, 100)
+    assessment_status = _assessment_status(final_score, base_score, min_pass_score, integrity_risk["level"])
+    recommendation = _recommendation(final_score, integrity_risk["level"], base_score, min_pass_score)
 
     return {
+        "baseScore": base_score,
         "finalScore": final_score,
         "recommendation": recommendation,
+        "assessmentStatus": assessment_status,
+        "minPassScore": min_pass_score,
         "integrityRisk": integrity_risk,
         "perQuestion": per_question,
-        "summary": _summary(candidate, final_score, recommendation, integrity_risk),
+        "summary": _summary(candidate, final_score, recommendation, integrity_risk, base_score, assessment_status),
     }
 
 
@@ -263,11 +277,35 @@ def _score_single_answer(index: int, question: str, answer: str, jd_text: str) -
         return {
             "questionIndex": index,
             "question": question,
+            "answerText": "",
             "answered": False,
             "score": 0,
             "verdict": "Missing",
             "summary": "No answer submitted.",
             "method": "none",
+        }
+    if _is_insufficient_answer(answer):
+        return {
+            "questionIndex": index,
+            "question": question,
+            "answerText": answer[:8000],
+            "answered": True,
+            "score": 5,
+            "verdict": "Weak",
+            "summary": "Answer is too short or too low-signal to evaluate reliably.",
+            "method": "quality_gate",
+            "dimensions": {
+                "clarity": 1,
+                "relevance": 0,
+                "starQuality": 0,
+                "specificity": 0,
+                "communication": 1,
+                "jobFit": 0,
+            },
+            "keyStrength": "N/A",
+            "keyImprovement": "Provide a complete spoken answer with specific examples.",
+            "recruiterVerdict": "Do Not Advance",
+            "starDetected": False,
         }
 
     # Try LLM scoring first
@@ -287,6 +325,7 @@ def _score_single_answer(index: int, question: str, answer: str, jd_text: str) -
         return {
             "questionIndex": index,
             "question": question,
+            "answerText": answer[:8000],
             "answered": True,
             "score": score,
             "verdict": simple_verdict,
@@ -319,6 +358,7 @@ def _score_single_answer(index: int, question: str, answer: str, jd_text: str) -
     return {
         "questionIndex": index,
         "question": question,
+        "answerText": answer[:8000],
         "answered": True,
         "score": score,
         "verdict": verdict,
@@ -329,6 +369,18 @@ def _score_single_answer(index: int, question: str, answer: str, jd_text: str) -
 
 # ── Integrity Risk ────────────────────────────────────────────────────────
 
+def _is_insufficient_answer(answer: str) -> bool:
+    cleaned = re.sub(r"\s+", " ", answer or "").strip()
+    if not cleaned or not any(ch.isalnum() for ch in cleaned):
+        return True
+    if len(cleaned) < 20:
+        return True
+    ascii_words = re.findall(r"[A-Za-z0-9][A-Za-z0-9'-]{1,}", cleaned)
+    if len(ascii_words) < 4 and len(cleaned.split()) < 4:
+        return True
+    return False
+
+
 def summarize_integrity_risk(signals: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(signals, dict):
         signals = {}
@@ -338,19 +390,24 @@ def summarize_integrity_risk(signals: dict[str, Any]) -> dict[str, Any]:
     devtools_attempts = _non_negative_int(signals.get("devtoolsAttempts", 0))
     face_not_detected = _non_negative_int(signals.get("faceNotDetected", 0))
     multiple_faces = _non_negative_int(signals.get("multipleFaces", 0))
+    screen_count = max(1, _non_negative_int(signals.get("screenCount", 1)))
 
     raw_risk = (
         tab_switches * 2
-        + fullscreen_exits * 3
-        + copy_paste_attempts * 4
-        + devtools_attempts * 5
+        + fullscreen_exits * 4
+        + copy_paste_attempts * 5
+        + devtools_attempts * 8
         + face_not_detected * 2
-        + multiple_faces * 5
+        + multiple_faces * 6
+        + max(0, screen_count - 1) * 3
     )
-    if raw_risk >= 12:
+    if raw_risk >= 40:
+        level = "Critical"
+        penalty = 15
+    elif raw_risk >= 25:
         level = "High"
         penalty = 10
-    elif raw_risk >= 5:
+    elif raw_risk >= 10:
         level = "Medium"
         penalty = 5
     else:
@@ -366,22 +423,48 @@ def summarize_integrity_risk(signals: dict[str, Any]) -> dict[str, Any]:
         "devtoolsAttempts": devtools_attempts,
         "faceNotDetected": face_not_detected,
         "multipleFaces": multiple_faces,
+        "screenCount": screen_count,
+        "riskScore": raw_risk,
         "eventCount": len(signals.get("events", [])) if isinstance(signals.get("events"), list) else 0,
     }
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────
 
-def _recommendation(score: int, risk_level: str) -> str:
-    if score >= 75 and risk_level != "High":
+def _assessment_status(final_score: int, base_score: int, min_pass_score: int, risk_level: str) -> str:
+    if risk_level in {"High", "Critical"} and base_score >= min_pass_score:
+        return "Review Required"
+    if final_score >= min_pass_score:
+        return "Passed"
+    return "Below Threshold"
+
+
+def _recommendation(score: int, risk_level: str, base_score: int | None = None, min_pass_score: int = 60) -> str:
+    answer_score = score if base_score is None else base_score
+    if risk_level in {"High", "Critical"} and answer_score >= min_pass_score:
+        return "Manual Review Required"
+    if score >= 75:
         return "Strong Fit"
-    if score < 50 or risk_level == "High":
+    if score < 50:
         return "Not Recommended"
     return "Needs Review"
 
 
-def _summary(candidate: dict[str, Any], score: int, recommendation: str, integrity_risk: dict[str, Any]) -> str:
+def _summary(
+    candidate: dict[str, Any],
+    score: int,
+    recommendation: str,
+    integrity_risk: dict[str, Any],
+    base_score: int,
+    assessment_status: str,
+) -> str:
     name = candidate.get("name") or "Candidate"
+    if assessment_status == "Review Required":
+        return (
+            f"{name} has an answer score of {base_score}/100 and a final score of {score}/100 "
+            f"after integrity adjustment. Manual review is required because integrity risk is "
+            f"{integrity_risk['level']}."
+        )
     return (
         f"{name} scored {score}/100 with a {recommendation} recommendation. "
         f"Integrity risk is {integrity_risk['level']}."
@@ -394,3 +477,11 @@ def _non_negative_int(value: Any) -> int:
     except (TypeError, ValueError):
         return 0
     return max(parsed, 0)
+
+
+def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(maximum, parsed))

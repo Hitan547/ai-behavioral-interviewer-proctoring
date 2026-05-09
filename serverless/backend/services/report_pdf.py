@@ -12,13 +12,22 @@ def generate_report_pdf(
     submission: dict[str, Any],
     result: dict[str, Any],
 ) -> bytes:
+    answers_by_index = {
+        int(answer.get("questionIndex", -1)): answer
+        for answer in submission.get("answers", [])
+        if isinstance(answer, dict)
+    }
     lines = [
-        "PsySense AI Recruiter Report",
+        "Talentryx AI Candidate Assessment Report",
         "",
         f"Candidate: {candidate.get('name', candidate.get('candidateId', 'Candidate'))}",
+        f"Email: {candidate.get('email', '')}",
         f"Job: {job.get('title', job.get('jobId', 'Job'))}",
+        f"Answer Score Before Integrity Penalty: {result.get('baseScore', result.get('finalScore', 0))}/100",
         f"Final Score: {result.get('finalScore', 0)}/100",
+        f"Assessment Status: {result.get('assessmentStatus', 'Below Threshold')}",
         f"Recommendation: {result.get('recommendation', 'Needs Review')}",
+        f"Minimum Pass Score: {result.get('minPassScore', job.get('minPassScore', 60))}/100",
         f"Submission: {submission.get('submissionId', '')}",
         "",
         "Integrity & Proctoring Summary",
@@ -35,15 +44,24 @@ def generate_report_pdf(
         "",
         "Question Breakdown",
     ])
+    if result.get("assessmentStatus") == "Review Required":
+        lines.extend([
+            "Review Required: Answer score meets the role threshold, but proctoring risk",
+            "requires recruiter review before making a hiring decision.",
+            "",
+        ])
 
     for item in result.get("perQuestion", [])[:10]:
         if not isinstance(item, dict):
             continue
         method = item.get("method", "unknown")
         verdict = item.get("recruiterVerdict") or item.get("verdict", "")
+        question_index = int(item.get("questionIndex", 0))
+        answer_text = str(answers_by_index.get(question_index, {}).get("answerText", "")).strip()
         lines.extend([
-            f"Q{int(item.get('questionIndex', 0)) + 1}: {item.get('score', 0)}/100 - {verdict} ({method})",
+            f"Q{question_index + 1}: {item.get('score', 0)}/100 - {verdict} ({method})",
             _wrap(f"Question: {item.get('question', '')}", 92),
+            _wrap(f"Answer: {answer_text or 'No answer recorded.'}", 92),
             _wrap(f"Summary: {item.get('summary', '')}", 92),
         ])
         # Include LLM dimensions if available
@@ -84,21 +102,26 @@ def _wrap(text: str, width: int) -> str:
 
 
 def _simple_pdf(lines: list[str]) -> bytes:
-    content_lines = ["BT", "/F1 10 Tf", "50 770 Td", "14 TL"]
-    for line in _paginate_lines(lines):
-        content_lines.append(f"({_escape_pdf_text(line)}) Tj")
-        content_lines.append("T*")
-    content_lines.append("ET")
-    stream = "\n".join(content_lines).encode("latin-1", errors="replace")
-
+    pages = _paginate_lines(lines)
+    page_refs = " ".join(f"{4 + index * 2} 0 R" for index in range(len(pages)))
     objects = [
         b"<< /Type /Catalog /Pages 2 0 R >>",
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
-        b"/Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+        f"<< /Type /Pages /Kids [{page_refs}] /Count {len(pages)} >>".encode("ascii"),
         b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
-        b"<< /Length " + str(len(stream)).encode("ascii") + b" >>\nstream\n" + stream + b"\nendstream",
     ]
+    for index, page_lines in enumerate(pages):
+        page_object_number = 4 + index * 2
+        content_object_number = page_object_number + 1
+        stream = _page_stream(page_lines)
+        objects.append(
+            (
+                f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+                f"/Resources << /Font << /F1 3 0 R >> >> /Contents {content_object_number} 0 R >>"
+            ).encode("ascii")
+        )
+        objects.append(
+            b"<< /Length " + str(len(stream)).encode("ascii") + b" >>\nstream\n" + stream + b"\nendstream"
+        )
 
     pdf = bytearray(b"%PDF-1.4\n")
     offsets = [0]
@@ -119,11 +142,21 @@ def _simple_pdf(lines: list[str]) -> bytes:
     return bytes(pdf)
 
 
-def _paginate_lines(lines: list[str]) -> list[str]:
+def _page_stream(lines: list[str]) -> bytes:
+    content_lines = ["BT", "/F1 9 Tf", "50 770 Td", "12 TL"]
+    for line in lines:
+        content_lines.append(f"({_escape_pdf_text(line)}) Tj")
+        content_lines.append("T*")
+    content_lines.append("ET")
+    return "\n".join(content_lines).encode("latin-1", errors="replace")
+
+
+def _paginate_lines(lines: list[str]) -> list[list[str]]:
     expanded: list[str] = []
     for line in lines:
         expanded.extend(str(line).splitlines() or [""])
-    return expanded[:48]
+    page_size = 58
+    return [expanded[index:index + page_size] for index in range(0, len(expanded), page_size)] or [[]]
 
 
 def _escape_pdf_text(text: str) -> str:

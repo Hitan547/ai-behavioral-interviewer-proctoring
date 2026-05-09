@@ -13,8 +13,8 @@ from typing import Any
 def transcribe_audio_bytes(audio_bytes: bytes, *, filename: str, content_type: str, prompt: str = "") -> str:
     if not audio_bytes:
         raise ValueError("Audio file is empty.")
-    api_key = _get_groq_api_key()
-    if not api_key:
+    api_keys = _get_groq_api_keys()
+    if not api_keys:
         raise RuntimeError("Groq API key is not configured.")
 
     boundary = f"----psysense-{uuid.uuid4().hex}"
@@ -30,38 +30,48 @@ def transcribe_audio_bytes(audio_bytes: bytes, *, filename: str, content_type: s
         content_type=content_type,
         file_bytes=audio_bytes,
     )
-    request = urllib.request.Request(
-        "https://api.groq.com/openai/v1/audio/transcriptions",
-        data=body,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": f"multipart/form-data; boundary={boundary}",
-        },
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=45) as response:
-            payload: dict[str, Any] = json.loads(response.read().decode("utf-8"))
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-        raise RuntimeError("Audio transcription provider request failed.") from exc
-    return str(payload.get("text", "")).strip()
+    last_error: Exception | None = None
+    for api_key in api_keys:
+        request = urllib.request.Request(
+            "https://api.groq.com/openai/v1/audio/transcriptions",
+            data=body,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+                "Accept": "application/json",
+                "User-Agent": "TalentryxAIServerless/1.0",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=45) as response:
+                payload: dict[str, Any] = json.loads(response.read().decode("utf-8"))
+            return str(payload.get("text", "")).strip()
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+            last_error = exc
+    raise RuntimeError("Audio transcription provider request failed.") from last_error
 
 
-def _get_groq_api_key() -> str:
-    env_key = os.environ.get("GROQ_API_KEY") or os.environ.get("GROQ_API_KEY_2")
-    if env_key:
-        return env_key.strip()
+def _get_groq_api_keys() -> list[str]:
+    keys: list[str] = []
+    for env_name in ("GROQ_API_KEY", "GROQ_API_KEY_2"):
+        env_key = os.environ.get(env_name, "").strip()
+        if env_key and env_key not in keys:
+            keys.append(env_key)
 
     parameter_name = os.environ.get("GROQ_API_KEY_PARAMETER_NAME", "").strip()
     if not parameter_name:
-        return ""
+        return keys
 
     try:
         import boto3  # type: ignore
     except ImportError:
-        return ""
+        return keys
     response = boto3.client("ssm").get_parameter(Name=parameter_name, WithDecryption=True)
-    return str(response.get("Parameter", {}).get("Value", "")).strip()
+    ssm_key = str(response.get("Parameter", {}).get("Value", "")).strip()
+    if ssm_key and ssm_key not in keys:
+        keys.append(ssm_key)
+    return keys
 
 
 def _multipart_body(
