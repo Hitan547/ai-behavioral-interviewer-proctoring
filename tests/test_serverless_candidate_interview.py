@@ -30,12 +30,17 @@ class FakeDynamoTable:
         key = (Key["pk"], Key["sk"])
         if key not in self.items:
             raise AssertionError("missing item")
-        self.items[key].update({
+        updates = {
             "interviewStatus": ExpressionAttributeValues[":status"],
-            "latestSubmissionId": ExpressionAttributeValues[":submissionId"],
-            "submittedAt": ExpressionAttributeValues[":submittedAt"],
             "updatedAt": ExpressionAttributeValues[":updatedAt"],
-        })
+        }
+        if ":startedAt" in ExpressionAttributeValues:
+            updates["startedAt"] = ExpressionAttributeValues[":startedAt"]
+        if ":submissionId" in ExpressionAttributeValues:
+            updates["latestSubmissionId"] = ExpressionAttributeValues[":submissionId"]
+        if ":submittedAt" in ExpressionAttributeValues:
+            updates["submittedAt"] = ExpressionAttributeValues[":submittedAt"]
+        self.items[key].update(updates)
         return {"ResponseMetadata": {"HTTPStatusCode": 200}}
 
 
