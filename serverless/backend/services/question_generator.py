@@ -34,6 +34,7 @@ def generate_questions_with_keywords(
             questions, keywords = _parse_questions(payload)
             questions, keywords = _complete_questions(questions, keywords, fallback_questions, fallback_keywords)
             questions, keywords = _diversify_generic_questions(questions, keywords, fallback_questions, fallback_keywords)
+            questions, keywords = _enforce_behavioral_mix(questions, keywords, fallback_questions, fallback_keywords)
             vocab = _compact_vocab(resume_text, jd_text, keywords, generation_seed)
             return questions, keywords, vocab
         except Exception:
@@ -83,12 +84,15 @@ def _build_prompt(resume_text: str, jd_text: str, generation_seed: str) -> str:
         "- Can you describe your experience with deploying ML models as REST APIs using FastAPI or Flask?\n"
         "- How do you collaborate with product and engineering teams to integrate AI features into existing products?\n"
         "- Can you explain your approach to monitoring model performance and retraining as needed?\n\n"
-        "Question mix:\n"
-        "1. One concrete project or achievement from the resume that maps to the JD.\n"
-        "2. One JD-critical skill or responsibility, including how they handled it in practice.\n"
-        "3. One technical depth question about implementation, deployment, data, reliability, or tradeoffs.\n"
-        "4. One collaboration/ownership behavioral question tied to the role.\n"
-        "5. One gap, learning, debugging, or production-readiness question.\n"
+        "Question mix, in this exact order:\n"
+        "1. Role-specific technical evidence from the resume/JD.\n"
+        "2. Project ownership and measurable delivery outcome.\n"
+        "3. Problem-solving, debugging, tradeoff, or production incident handling.\n"
+        "4. Teamwork, conflict, stakeholder communication, or collaboration behavior.\n"
+        "5. Adaptability, feedback, learning under pressure, or growth behavior.\n"
+        "Questions 2, 4, and 5 should ask for specific past examples using wording like "
+        "\"Tell me about a time\", \"Describe a situation\", or \"Give an example\" so the candidate can answer with STAR structure.\n"
+        "Do not ask psychology, emotion-reading, mental-health, or personality diagnosis questions. Focus only on workplace behavior evidence.\n"
         "For each question, provide 5-8 relevant keywords the candidate may say.\n\n"
         "Return only this JSON object with no markdown:\n"
         '{"questions":[{"question":"Question?","keywords":["term"]}]}'
@@ -224,6 +228,69 @@ def _is_generic_question(question: str) -> bool:
     return any(marker in normalized for marker in generic_markers)
 
 
+def _enforce_behavioral_mix(
+    questions: list[str],
+    keywords: list[list[str]],
+    fallback_questions: list[str],
+    fallback_keywords: list[list[str]],
+) -> tuple[list[str], list[list[str]]]:
+    if len(questions) < 5 or len(fallback_questions) < 5:
+        return questions, keywords
+    if sum(1 for question in questions if _is_behavioral_question(question)) >= 2:
+        return questions, keywords
+
+    mixed = list(questions)
+    mixed_keywords = list(keywords)
+    for target_index in (3, 4):
+        if not _is_behavioral_question(mixed[target_index]):
+            mixed[target_index] = fallback_questions[target_index]
+            if target_index < len(mixed_keywords):
+                mixed_keywords[target_index] = fallback_keywords[target_index] if target_index < len(fallback_keywords) else []
+
+    if sum(1 for question in mixed if _is_behavioral_question(question)) >= 2:
+        return mixed, mixed_keywords
+
+    behavioral_fallbacks = [
+        (index, question)
+        for index, question in enumerate(fallback_questions)
+        if _is_behavioral_question(question)
+    ]
+    fallback_cursor = 0
+    for target_index in (1, 2, 3, 4):
+        if sum(1 for question in mixed if _is_behavioral_question(question)) >= 2:
+            break
+        if _is_behavioral_question(mixed[target_index]) or fallback_cursor >= len(behavioral_fallbacks):
+            continue
+        fallback_index, fallback_question = behavioral_fallbacks[fallback_cursor]
+        mixed[target_index] = fallback_question
+        if target_index < len(mixed_keywords):
+            mixed_keywords[target_index] = fallback_keywords[fallback_index] if fallback_index < len(fallback_keywords) else []
+        fallback_cursor += 1
+    return mixed, mixed_keywords
+
+
+def _is_behavioral_question(question: str) -> bool:
+    normalized = question.lower()
+    markers = (
+        "tell me about a time",
+        "describe a time",
+        "describe a situation",
+        "give an example",
+        "disagreement",
+        "conflict",
+        "stakeholder",
+        "collaboration",
+        "team",
+        "feedback",
+        "learn",
+        "pressure",
+        "owned",
+        "ownership",
+        "tradeoff",
+    )
+    return any(marker in normalized for marker in markers)
+
+
 def _question_key(question: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", question.lower()).strip()
 
@@ -261,19 +328,19 @@ def _contextual_fallback_questions(resume_text: str, jd_text: str, generation_se
     variant = _seed_number(generation_seed)
     question_banks = [
         [
-            f"Pick one resume project involving {project_terms}. What problem did it solve, what was your exact ownership, and how did you measure success?",
-            f"Tell me about the most production-like work you did with {project_terms}. What broke, what did you change, and what was the result?",
+            f"Which resume project best proves your fit for this role using {project_terms}? What did you build and why was it relevant?",
+            f"What is the most role-relevant technical work you did with {project_terms}, and what result did it create?",
             f"Choose a project from your resume that best matches this role. How did {project_terms} influence the design and delivery decisions?",
         ],
         [
-            f"The JD emphasizes {role_terms}. Describe a past situation where you handled a similar responsibility, including one tradeoff you made.",
-            f"Where is your strongest evidence for {role_terms}, and where would you need ramp-up time if hired for this role?",
-            f"Imagine you joined this team next week and had to deliver work around {role_terms}. What would you reuse from your past experience?",
+            f"Tell me about a time you owned delivery for work related to {role_terms}. What was your responsibility, what action did you take, and what changed because of it?",
+            f"Describe a situation where you had to deliver results around {role_terms} with limited time or resources. How did you prioritize?",
+            f"Give an example of a project where you had real ownership connected to {role_terms}. How did you measure whether it succeeded?",
         ],
         [
-            f"Design a reliable production workflow using {technical_terms}. How would you validate inputs, monitor failures, and decide when to rollback?",
+            f"Give an example of a difficult bug, model issue, data issue, or production problem involving {technical_terms}. How did you find the root cause and prevent it later?",
             f"Suppose a feature using {technical_terms} suddenly starts giving poor results in production. How would you debug it end to end?",
-            f"Walk through the architecture choices you would make for {technical_terms}, including data flow, API boundaries, and operational risks.",
+            f"Describe a technical tradeoff you made while working with {technical_terms}. What did you choose, what did you reject, and why?",
         ],
         [
             "Tell me about a time you had to align product, engineering, or business stakeholders when the technical answer was not obvious.",
@@ -281,18 +348,18 @@ def _contextual_fallback_questions(resume_text: str, jd_text: str, generation_se
             "Give an example of when you had to explain a technical risk to a non-technical stakeholder and influence the next step.",
         ],
         [
-            f"Give an example of a difficult bug, model issue, data issue, or production problem involving {delivery_terms}. How did you find the root cause and prevent it later?",
-            f"Tell me about a time a solution involving {delivery_terms} did not work as expected. What signals told you it was failing?",
-            f"What is one gap in your experience for this role, and how would you close it while delivering work involving {delivery_terms}?",
+            f"Tell me about a time you had to learn something quickly to deliver work involving {delivery_terms}. How did you approach it?",
+            "Describe a time you received critical feedback on your work. What did you change afterward?",
+            f"Give an example of when priorities changed while you were working on {delivery_terms}. How did you adapt without losing quality?",
         ],
     ]
     questions = [bank[(variant + index) % len(bank)] for index, bank in enumerate(question_banks)]
     keyword_groups = [
         resume_terms[:8],
-        jd_terms[:8],
-        combined_terms[:8],
-        ["stakeholders", "tradeoff", "communication", "ownership", "delivery"],
-        combined_terms[:8] or ["debugging", "root cause", "monitoring", "prevention"],
+        jd_terms[:8] + ["ownership", "result", "prioritization"],
+        combined_terms[:8] + ["debugging", "root cause", "tradeoff", "prevention"],
+        ["stakeholders", "conflict", "communication", "alignment", "decision"],
+        combined_terms[:8] + ["feedback", "learning", "adaptability", "pressure"],
     ]
     return questions, keyword_groups
 
@@ -379,8 +446,8 @@ def _default_vocab() -> dict[str, Any]:
 def _default_questions() -> list[str]:
     return [
         "Walk me through a project you built end-to-end. What was your role and what did you deliver?",
-        "Tell me about a time you had to learn a new technology quickly under pressure.",
-        "Describe a situation where you disagreed with a technical decision made by your team.",
-        "What is the most complex problem you have solved, and how did you approach it?",
-        "Why are you interested in this role, and what specifically makes you a strong fit?",
+        "Tell me about a time you owned an important task from start to finish. What was the outcome?",
+        "Give an example of a difficult technical problem you debugged. How did you find the root cause?",
+        "Describe a situation where you disagreed with a teammate or stakeholder. How did you handle it?",
+        "Tell me about a time you received feedback or had to learn quickly under pressure. What changed afterward?",
     ]
