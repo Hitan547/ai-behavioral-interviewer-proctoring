@@ -1,12 +1,68 @@
+<div align="center">
+
 # Talentryx AI
 
-AI behavioral interview and proctoring SaaS for structured candidate screening.
+### AI Behavioral Interview, Resume Intelligence, and Proctoring SaaS
 
-[![CI Pipeline](https://github.com/anbunathanr/ai-behavioral-interviewer-proctoring/actions/workflows/ci.yml/badge.svg)](https://github.com/anbunathanr/ai-behavioral-interviewer-proctoring/actions/workflows/ci.yml)
+Talentryx AI helps recruiters run structured hiring drives: create jobs, analyze resumes against JDs, invite shortlisted candidates, run browser-based AI-assisted interviews, collect proctoring signals, and review explainable scorecards from a recruiter dashboard.
 
-Talentryx AI helps recruiters create role-specific interview drives, shortlist candidates from resumes and job descriptions, invite candidates with one-time credentials, run browser-based AI-assisted behavioral interviews, collect proctoring signals, and review structured scorecards from a recruiter dashboard.
+<p>
+  <a href="https://github.com/anbunathanr/ai-behavioral-interviewer-proctoring/actions/workflows/ci.yml">
+    <img alt="CI Pipeline" src="https://img.shields.io/github/actions/workflow/status/anbunathanr/ai-behavioral-interviewer-proctoring/ci.yml?branch=main&label=CI%20Pipeline&logo=github&style=for-the-badge">
+  </a>
+  <img alt="AWS Serverless" src="https://img.shields.io/badge/AWS-Serverless-FF9900?style=for-the-badge&logo=amazonaws&logoColor=white">
+  <img alt="Human in the loop" src="https://img.shields.io/badge/Human--in--the--Loop-Decision%20Support-0F766E?style=for-the-badge">
+  <img alt="Status" src="https://img.shields.io/badge/Status-Pilot--Ready%20MVP-2563EB?style=for-the-badge">
+</p>
+
+<p>
+  <img alt="React" src="https://img.shields.io/badge/React-19-61DAFB?style=flat-square&logo=react&logoColor=061B23">
+  <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-5.x-3178C6?style=flat-square&logo=typescript&logoColor=white">
+  <img alt="Vite" src="https://img.shields.io/badge/Vite-7.x-646CFF?style=flat-square&logo=vite&logoColor=white">
+  <img alt="Python" src="https://img.shields.io/badge/Python-3.10+-3776AB?style=flat-square&logo=python&logoColor=white">
+  <img alt="AWS Lambda" src="https://img.shields.io/badge/Lambda-Functions-FF9900?style=flat-square&logo=awslambda&logoColor=white">
+  <img alt="DynamoDB" src="https://img.shields.io/badge/DynamoDB-Single%20Table-4053D6?style=flat-square&logo=amazondynamodb&logoColor=white">
+  <img alt="S3" src="https://img.shields.io/badge/S3-Artifacts-569A31?style=flat-square&logo=amazons3&logoColor=white">
+  <img alt="Cognito" src="https://img.shields.io/badge/Cognito-Auth-DD344C?style=flat-square&logo=amazoncognito&logoColor=white">
+  <img alt="API Gateway" src="https://img.shields.io/badge/API%20Gateway-HTTP%20API-FF4F8B?style=flat-square&logo=amazonapigateway&logoColor=white">
+  <img alt="Step Functions" src="https://img.shields.io/badge/Step%20Functions-Scoring-CC2264?style=flat-square&logo=awsstepfunctions&logoColor=white">
+  <img alt="SAM" src="https://img.shields.io/badge/AWS%20SAM-IaC-232F3E?style=flat-square&logo=amazonaws&logoColor=white">
+  <img alt="Groq" src="https://img.shields.io/badge/Groq-LLM%20%2B%20STT-F55036?style=flat-square">
+  <img alt="n8n" src="https://img.shields.io/badge/n8n-Invite%20Automation-EA4B71?style=flat-square&logo=n8n&logoColor=white">
+  <img alt="Flask" src="https://img.shields.io/badge/Flask-Local%20API-000000?style=flat-square&logo=flask&logoColor=white">
+  <img alt="FastAPI" src="https://img.shields.io/badge/FastAPI-Legacy%20Services-009688?style=flat-square&logo=fastapi&logoColor=white">
+  <img alt="Streamlit" src="https://img.shields.io/badge/Streamlit-Legacy%20Prototype-FF4B4B?style=flat-square&logo=streamlit&logoColor=white">
+  <img alt="Docker" src="https://img.shields.io/badge/Docker-Legacy%20Packaging-2496ED?style=flat-square&logo=docker&logoColor=white">
+  <img alt="Plotly" src="https://img.shields.io/badge/Plotly-Dashboards-3F4F75?style=flat-square&logo=plotly&logoColor=white">
+  <img alt="Razorpay" src="https://img.shields.io/badge/Razorpay-Billing%20Reference-0C2451?style=flat-square">
+  <img alt="PDF Reports" src="https://img.shields.io/badge/PDF-Reports-DC2626?style=flat-square&logo=adobeacrobatreader&logoColor=white">
+  <img alt="Pytest" src="https://img.shields.io/badge/Pytest-Tests-0A9EDC?style=flat-square&logo=pytest&logoColor=white">
+  <img alt="Ruff" src="https://img.shields.io/badge/Ruff-Lint-D7FF64?style=flat-square&logo=ruff&logoColor=111111">
+  <img alt="GitHub Actions" src="https://img.shields.io/badge/GitHub%20Actions-CI-2088FF?style=flat-square&logo=githubactions&logoColor=white">
+</p>
+
+</div>
+
+---
+
+## Executive Summary
+
+Talentryx AI is a full-stack AI hiring platform for behavioral interviews and proctoring. It combines resume/JD intelligence, candidate credential-based interview access, browser proctoring, answer transcription, LLM-assisted scoring, PDF reporting, billing foundation, and a recruiter dashboard into a serverless SaaS architecture.
 
 The product is built as a human-in-the-loop decision-support platform. AI scores, recommendations, and integrity signals are review aids, not final hiring decisions.
+
+## Tech Stack
+
+| Layer | Technologies |
+| --- | --- |
+| Frontend | React, TypeScript, Vite, lucide-react, browser media APIs |
+| Backend | Python Lambda handlers, Flask local wrapper, repository/service layering |
+| AWS serverless | Cognito, API Gateway HTTP API, Lambda, DynamoDB, S3, Step Functions, SSM Parameter Store, CloudWatch, SAM |
+| AI and automation | Groq API for LLM/STT, n8n webhook invite automation |
+| Reports and documents | PDF report generation, resume text extraction, S3 artifact storage |
+| Legacy prototype | Streamlit, FastAPI microservices, SQLite/PostgreSQL-compatible SQLAlchemy layer, Plotly, WebRTC |
+| Quality | GitHub Actions, pytest, Ruff, TypeScript build, SAM template validation |
+| Commercial foundation | Billing usage tracking, plan model, Razorpay-ready legacy billing reference |
 
 ## Product Snapshot
 
@@ -47,6 +103,17 @@ This repository contains two generations of the product:
 The active product is `serverless/`.
 
 The `legacy-streamlit/` folder is kept only as a reference for the original prototype, older dashboard ideas, and previous local demo behavior.
+
+## Architecture Evolution
+
+Talentryx AI started as a Streamlit prototype so the interview flow, recruiter dashboard, scoring reports, and proctoring ideas could be validated quickly. The active product has now moved to an AWS serverless architecture so it can become a deployable SaaS with cleaner auth, persistence, isolation, scaling, and cost controls.
+
+| Generation | Folder | Purpose | Status |
+| --- | --- | --- | --- |
+| Streamlit prototype | `legacy-streamlit/` | Original demo app, old dashboard, local microservices, early scoring/proctoring UI | Reference only |
+| AWS serverless SaaS | `serverless/` | Active recruiter/candidate product, Lambda APIs, React frontend, DynamoDB/S3 persistence, Cognito auth | Production direction |
+
+The Streamlit version is intentionally preserved because it documents the product's early behavior and helps compare dashboard/reporting ideas. It is not the deployment target.
 
 ## Core Product Flow
 
@@ -206,6 +273,71 @@ flowchart TB
     L4 --> CW
     L5 --> CW
 ```
+
+## Legacy Streamlit Architecture
+
+The Streamlit prototype used a local-first architecture with one main UI app and several Python services. It was useful for fast experimentation, but it is not the approved production path.
+
+```mermaid
+flowchart TB
+    subgraph Browser["Candidate / Recruiter Browser"]
+        B1["Streamlit UI<br/>demo_app.py"]
+    end
+
+    subgraph Streamlit["Legacy Streamlit App"]
+        DASH["recruiter_dashboard.py<br/>analytics + reports"]
+        JD["recruiter_jd_page.py<br/>JD + resume shortlist"]
+        PROCTOR["proctoring_client.py<br/>tab/fullscreen/camera signals"]
+        DB["database.py<br/>SQLAlchemy local persistence"]
+    end
+
+    subgraph Services["Local Python Services"]
+        ANSWER["answer_service<br/>LLM answer scoring"]
+        FUSION["fusion_service<br/>score fusion"]
+        EMOTION["emotion_service<br/>delivery signal"]
+        INSIGHT["insight_service<br/>AI insight"]
+        ENGAGE["engagement_service<br/>attention/face signal"]
+    end
+
+    subgraph Storage["Local / Prototype Storage"]
+        SQLITE["SQLite / local DB"]
+        FILES["Local files<br/>reports, audio, resumes"]
+    end
+
+    subgraph External["External Integrations"]
+        GROQ2["Groq API<br/>transcription + LLM"]
+        N8N2["n8n<br/>candidate invite emails"]
+        RAZOR["Razorpay-ready<br/>billing reference"]
+    end
+
+    B1 --> DASH
+    B1 --> JD
+    B1 --> PROCTOR
+    DASH --> DB
+    JD --> DB
+    DB --> SQLITE
+    B1 --> ANSWER
+    B1 --> FUSION
+    B1 --> EMOTION
+    B1 --> INSIGHT
+    B1 --> ENGAGE
+    ANSWER --> GROQ2
+    JD --> N8N2
+    DASH --> FILES
+    DASH --> RAZOR
+```
+
+## Why Serverless Replaced Streamlit for Production
+
+| Need | Streamlit Prototype | AWS Serverless Product |
+| --- | --- | --- |
+| Recruiter/candidate isolation | App-level session logic | Cognito + API authorization boundaries |
+| Data persistence | Local SQL-style app data | DynamoDB tenant-scoped records and S3 artifacts |
+| Candidate invites | Local/n8n prototype flow | Stored candidate credentials + n8n webhook provider |
+| Scaling | Single app/process-oriented | Lambda/API Gateway scale per request |
+| Cost control | Local demo friendly | Pay-per-use serverless resources |
+| Deployment governance | Docker/Streamlit-style deployment | SAM/CloudFormation under CEO guardrails |
+| Auditability | Prototype history | Candidate status, submission, scoring, retest/audit foundation |
 
 ## CEO AWS Guardrails
 
