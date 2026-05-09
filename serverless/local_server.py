@@ -32,7 +32,7 @@ for _stream in (sys.stdout, sys.stderr):
 # Add backend to Python path so handlers can import normally
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "backend"))
 
-from flask import Flask, request, jsonify, send_file  # noqa: E402
+from flask import Flask, jsonify, request, send_file  # noqa: E402
 
 app = Flask(__name__)
 app.url_map.strict_slashes = False
@@ -211,7 +211,6 @@ class _LocalS3Client:
         return {"Body": _Body(path), "ContentType": "application/octet-stream"}
 
     def generate_presigned_url(self, ClientMethod: str, Params: dict, ExpiresIn: int = 900, HttpMethod: str = "GET"):
-        bucket = Params.get("Bucket", "")
         key = Params.get("Key", "")
         content_type = Params.get("ContentType", "application/octet-stream")
         if ClientMethod == "put_object":
@@ -244,15 +243,15 @@ class _LocalSESClient:
     def send_email(self, *, Source: str, Destination: dict, Message: dict, **kwargs):
         to_list = Destination.get("ToAddresses", [])
         subject = Message.get("Subject", {}).get("Data", "(no subject)")
-        print(f"\n  📧 SES MOCK — Email sent:")
+        print("\n  📧 SES MOCK — Email sent:")
         print(f"     From:    {Source}")
         print(f"     To:      {', '.join(to_list)}")
         print(f"     Subject: {subject}")
-        print(f"     (Body logged to console, not actually sent)\n")
+        print("     (Body logged to console, not actually sent)\n")
         return {"MessageId": f"local-{int(time.time())}"}
 
     def send_raw_email(self, **kwargs):
-        print(f"\n  📧 SES MOCK — Raw email sent (logged, not delivered)\n")
+        print("\n  📧 SES MOCK — Raw email sent (logged, not delivered)\n")
         return {"MessageId": f"local-raw-{int(time.time())}"}
 
 
@@ -260,7 +259,7 @@ class _LocalStepFunctionsClient:
     """Calls scoring_worker.handler() directly instead of starting a state machine."""
 
     def start_execution(self, *, stateMachineArn: str, input: str, **kwargs):
-        print(f"\n  ⚡ StepFunctions MOCK — calling scoring_worker directly...")
+        print("\n  ⚡ StepFunctions MOCK — calling scoring_worker directly...")
         payload = json.loads(input)
         from handlers.scoring_worker import handler as scoring_worker_handler
         try:
@@ -417,7 +416,6 @@ def recruiter_signup_route():
     if email in LOCAL_RECRUITERS:
         return jsonify({"error": "Recruiter already exists. Use Recruiter Login."}), 409
 
-    import re
     safe_org = re.sub(r"[^a-z0-9]+", "-", org_name.lower()).strip("-") or "local-demo"
     org_id = f"{safe_org}-{len(LOCAL_RECRUITERS) + 1}"
     account = {
@@ -727,9 +725,9 @@ if __name__ == "__main__":
         print("    → Add GROQ_API_KEY=gsk_... to serverless/.env")
 
     print(f"  ✓ S3 mock     → {ARTIFACT_DIR}")
-    print(f"  ✓ SSM mock    → reads from environment / .env")
-    print(f"  ✓ SES mock    → logs to console")
-    print(f"  ✓ StepFn mock → calls scoring_worker directly")
+    print("  ✓ SSM mock    → reads from environment / .env")
+    print("  ✓ SES mock    → logs to console")
+    print("  ✓ StepFn mock → calls scoring_worker directly")
 
     setup_dynamodb()
 
