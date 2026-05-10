@@ -2,6 +2,11 @@ venv310/
 venv*/
 .aws-sam/
 serverless/.aws-sam/
+serverless/.sam-appdata/
+serverless/.sam-tmp/
+serverless/_sam_tmp_local/
+.codex_appdata/
+.sam-local-appdata/
 serverless/packaged.yaml
 data/
 hf_cache/

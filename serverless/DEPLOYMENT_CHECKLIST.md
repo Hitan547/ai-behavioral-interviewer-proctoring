@@ -1,6 +1,8 @@
-# PsySense Serverless Deployment Checklist
+# Talentryx AI Serverless Deployment Checklist
 
 This checklist uses your own Groq key, n8n webhook, frontend URL, and recruiter email. Do not send those secrets to CEO/admin.
+
+Public product name is Talentryx AI. Existing AWS resource prefixes intentionally remain `psysense-*` for continuity; see `BRANDING.md`.
 
 ## Current Blocker
 
@@ -17,10 +19,17 @@ Install and verify:
 ```powershell
 sam.cmd --version
 aws --version
-py -3.12 --version
 ```
 
-The SAM template uses Python 3.12, so `sam build` needs a local Python 3.12 runtime. Do not use the repo's old `venv310` for SAM builds.
+Expected local tooling:
+
+- SAM CLI available as `sam.cmd`
+- AWS CLI v2 available as `aws`
+- Node/npm available for the React frontend build
+
+The SAM template currently uses Lambda runtime `python3.10`. SAM CLI can build the Lambda package from `serverless/backend/requirements.txt`; do not use the repo's old `venv310` as the deployment runtime.
+
+If `aws --version` fails, install AWS CLI v2 or open a shell where AWS CLI is on `PATH` before running SSM/deploy commands.
 
 ## Values You Control
 
@@ -61,6 +70,17 @@ sam.cmd validate --template-file serverless\template.yaml
 
 Expected result: valid SAM template.
 
+If SAM CLI fails with an `AWS SAM\metadata.json` or temp-folder permission error on Windows, run it from a shell with writable app/temp folders, for example:
+
+```powershell
+$env:APPDATA = "$PWD\.sam-local-appdata"
+$env:TEMP = "$PWD\serverless\_sam_tmp_local"
+$env:TMP = $env:TEMP
+$env:SAM_CLI_TELEMETRY = "0"
+New-Item -ItemType Directory -Force -Path $env:APPDATA, $env:TEMP | Out-Null
+sam.cmd validate --template-file serverless\template.yaml --region us-east-1
+```
+
 ## Build With SAM
 
 Use SAM build so Lambda dependencies from `serverless/backend/requirements.txt` are vendored into the deployment artifact.
@@ -73,13 +93,15 @@ sam.cmd build `
 
 Do not replace this with raw `aws cloudformation package`; that skips the Python dependency build step.
 
+This build has been verified locally with SAM CLI. Warnings about SAM telemetry metadata are not deployment blockers if the build ends with `Build Succeeded`.
+
 ## Guardrail Scan Before Deploy
 
 Scan the built template:
 
 ```powershell
 Select-String -Path ".\serverless\.aws-sam\build\template.yaml" `
-  -Pattern "AWS::EC2|AWS::RDS|AWS::OpenSearchService|AWS::SageMaker|AWS::ECS|AWS::EKS|ElasticLoadBalancing|ElastiCache|Redshift|NatGateway|LoadBalancer|DBInstance"
+  -Pattern "AWS::EC2|AWS::RDS|AWS::OpenSearchService|AWS::SageMaker|AWS::ECS|AWS::EKS|ElasticLoadBalancing|ElastiCache|Redshift|NatGateway|LoadBalancer|DBInstance|AWS::SES"
 ```
 
 Expected result: no output.
@@ -187,6 +209,14 @@ After backend and frontend are connected:
 7. Open candidate link and submit answers.
 8. Start scoring.
 9. Confirm a scoring result and PDF report download URL are returned.
+
+Expected deployed behavior:
+
+- Recruiter login uses Cognito.
+- Candidate login uses invite credentials created by the app, not the recruiter dashboard.
+- Candidate interview, audio upload, transcription, and submit routes are public API routes protected by candidate session validation inside the Lambda handler.
+- Recruiter dashboard result routes require Cognito JWT authorization.
+- n8n sends candidate invite email through the configured webhook; no SES resource is created.
 
 ## CEO/Admin Ask
 

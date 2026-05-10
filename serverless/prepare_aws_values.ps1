@@ -14,6 +14,19 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+function Invoke-AwsCli {
+  param(
+    [Parameter(Mandatory = $true)][string[]]$Arguments
+  )
+
+  $aws = Get-Command aws -ErrorAction SilentlyContinue
+  if (-not $aws) {
+    throw "AWS CLI was not found on PATH. Install AWS CLI v2 or open a shell where 'aws --version' works before running this script."
+  }
+
+  & $aws.Source @Arguments
+}
+
 function Convert-SecureStringToPlainText {
   param([Parameter(Mandatory = $true)][SecureString]$Value)
 
@@ -36,12 +49,14 @@ function Put-SecureParameter {
 
   $plainValue = Convert-SecureStringToPlainText -Value $SecureValue
   try {
-    py -3.10 -m awscli ssm put-parameter `
-      --name $Name `
-      --type SecureString `
-      --value $plainValue `
-      --overwrite `
-      --region $Region | Out-Host
+    Invoke-AwsCli -Arguments @(
+      "ssm", "put-parameter",
+      "--name", $Name,
+      "--type", "SecureString",
+      "--value", $plainValue,
+      "--overwrite",
+      "--region", $Region
+    ) | Out-Host
   }
   finally {
     $plainValue = $null
@@ -49,7 +64,7 @@ function Put-SecureParameter {
 }
 
 Write-Host ""
-Write-Host "PsySense AWS value preparation"
+Write-Host "Talentryx AI AWS value preparation"
 Write-Host "Region: $Region"
 Write-Host "Stage:  $StageName"
 Write-Host ""

@@ -413,6 +413,8 @@ Resources:
             ApiId: !Ref HttpApi
             Path: /transcribe-practice
             Method: POST
+            Auth:
+              Authorizer: NONE
 
   ScoringApiFunction:
     Type: AWS::Serverless::Function
