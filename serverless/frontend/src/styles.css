@@ -644,6 +644,39 @@ textarea { min-height: 120px; resize: vertical; }
 .report-metrics strong { color: #17202a; font-size: 22px; }
 .report-metrics.small { grid-template-columns: repeat(4, 1fr); margin: 12px 0 16px; }
 .report-metrics.small strong { font-size: 18px; }
+.competency-strip {
+  background: #fff; border: 1px solid #dce5e8; border-radius: 10px;
+  display: grid; gap: 10px; padding: 14px 16px;
+}
+.competency-strip strong {
+  color: #17202a; font-size: 13px; font-weight: 800;
+}
+.competency-strip div,
+.question-badges {
+  align-items: center; display: flex; flex-wrap: wrap; gap: 8px;
+}
+.competency-pill {
+  border: 1px solid #d8e2e6; border-radius: 999px; color: #334155;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 11px; font-style: normal; font-weight: 800; line-height: 1.2;
+  min-height: 28px; padding: 6px 10px; white-space: nowrap;
+}
+.competency-pill.compact {
+  min-height: 24px; padding: 5px 9px;
+}
+.competency-pill.role { background: #eef2ff; border-color: #c7d2fe; color: #3730a3; }
+.competency-pill.ownership { background: #ecfdf5; border-color: #a7f3d0; color: #047857; }
+.competency-pill.problem { background: #eff6ff; border-color: #bfdbfe; color: #1d4ed8; }
+.competency-pill.teamwork { background: #fff7ed; border-color: #fed7aa; color: #c2410c; }
+.competency-pill.adaptability { background: #f5f3ff; border-color: #ddd6fe; color: #6d28d9; }
+.competency-context {
+  background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px;
+  display: flex; gap: 12px; align-items: center; padding: 12px 14px;
+}
+.competency-context p,
+.competency-note {
+  color: #52616b; font-size: 12px; line-height: 1.5; margin: 0;
+}
 .report-section-head {
   display: flex; align-items: center; gap: 8px; margin-top: 8px;
 }
@@ -1362,4 +1395,7 @@ progress.full-progress.recording::-webkit-progress-value { background: #ef4444; 
   .candidate-toolbar select { max-width: 100%; }
   .timer-display { flex-direction: column; text-align: center; }
   .candidate-panel { padding: 0 8px; }
+  .report-question-toggle { align-items: flex-start; flex-wrap: wrap; }
+  .report-question-toggle > span { flex-basis: 100%; }
+  .competency-context { align-items: flex-start; flex-direction: column; }
 }

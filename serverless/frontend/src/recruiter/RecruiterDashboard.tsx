@@ -177,6 +177,67 @@ function questionSignals(item: PerQuestion, riskPenalty: number) {
   return { answerQuality, delivery, attentiveness };
 }
 
+function competencyForQuestion(item: Pick<PerQuestion, "question">, index: number) {
+  const question = item.question.toLowerCase();
+  if (/(feedback|learn|adapt|pressure|priorities|growth|ramp)/.test(question)) {
+    return {
+      label: "Adaptability",
+      tone: "adaptability",
+      description: "Evidence of learning, resilience, and response to changing conditions.",
+    };
+  }
+  if (/(stakeholder|team|collaborat|conflict|disagree|communication|align|explain)/.test(question)) {
+    return {
+      label: "Teamwork & Communication",
+      tone: "teamwork",
+      description: "Evidence of collaboration, influence, conflict handling, and clarity with others.",
+    };
+  }
+  if (/(debug|root cause|problem|incident|tradeoff|failure|production|prevent)/.test(question)) {
+    return {
+      label: "Problem Solving",
+      tone: "problem",
+      description: "Evidence of structured thinking, troubleshooting, and sound tradeoff decisions.",
+    };
+  }
+  if (/(own|ownership|deliver|outcome|measure|responsibility|prioritize)/.test(question)) {
+    return {
+      label: "Ownership",
+      tone: "ownership",
+      description: "Evidence that the candidate takes responsibility and delivers measurable outcomes.",
+    };
+  }
+
+  const fallback = [
+    {
+      label: "Role Fit",
+      tone: "role",
+      description: "Evidence that resume experience matches the job requirements.",
+    },
+    {
+      label: "Ownership",
+      tone: "ownership",
+      description: "Evidence that the candidate takes responsibility and delivers measurable outcomes.",
+    },
+    {
+      label: "Problem Solving",
+      tone: "problem",
+      description: "Evidence of structured thinking, troubleshooting, and sound tradeoff decisions.",
+    },
+    {
+      label: "Teamwork & Communication",
+      tone: "teamwork",
+      description: "Evidence of collaboration, influence, conflict handling, and clarity with others.",
+    },
+    {
+      label: "Adaptability",
+      tone: "adaptability",
+      description: "Evidence of learning, resilience, and response to changing conditions.",
+    },
+  ];
+  return fallback[Math.min(index, fallback.length - 1)];
+}
+
 function candidateMatchesStatus(candidate: Candidate, status: string) {
   if (status === "All") return true;
   if (status === "Shortlisted") return Boolean(candidate.shortlisted) || candidate.interviewStatus === "Shortlisted";
@@ -338,6 +399,7 @@ function CandidateFullReport({
   const answerScore = answerScoreFor(result);
   const displayLabel = result.assessmentStatus === "Review Required" ? "Review Required" : scoreLabel(result.finalScore);
   const displayTone = result.assessmentStatus === "Review Required" ? "review" : scoreTone(result.finalScore);
+  const competencies = (result.perQuestion || []).map((item, index) => competencyForQuestion(item, index));
 
   return (
     <section className="full-report">
@@ -402,6 +464,19 @@ function CandidateFullReport({
         <div><span>Events</span><strong>{risk.eventCount || 0}</strong></div>
       </div>
 
+      {competencies.length > 0 && (
+        <div className="competency-strip" aria-label="Behavioral competency coverage">
+          <strong>Behavioral competency coverage</strong>
+          <div>
+            {competencies.map((competency, index) => (
+              <span key={`${competency.label}-${index}`} className={`competency-pill ${competency.tone}`}>
+                Q{index + 1} {competency.label}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div className="report-section-head">
         <BarChart3 size={22} />
         <h3>Score Trend</h3>
@@ -429,15 +504,21 @@ function CandidateFullReport({
         {(result.perQuestion || []).map((item, index) => {
           const expanded = expandedQuestion === item.questionIndex;
           const signals = questionSignals(item, risk.scorePenalty || 0);
+          const competency = competencyForQuestion(item, index);
           return (
             <div className="report-question" key={item.questionIndex}>
               <button className="report-question-toggle" onClick={() => onToggleQuestion(item.questionIndex)}>
                 {expanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
                 <span>Q{index + 1}: {item.question}</span>
+                <em className={`competency-pill compact ${competency.tone}`}>{competency.label}</em>
                 <em className={`verdict-pill ${verdictClass(item.verdict)}`}>{item.recruiterVerdict || item.verdict}</em>
               </button>
               {expanded && (
                 <div className="report-question-body">
+                  <div className="competency-context">
+                    <span className={`competency-pill ${competency.tone}`}>{competency.label}</span>
+                    <p>{competency.description}</p>
+                  </div>
                   <strong>Answer</strong>
                   <div className="answer-box">{item.answerText || "Answer text is available for newly scored submissions. Older results may need to be rescored."}</div>
                   <div className="report-metrics small">
@@ -1216,16 +1297,22 @@ export function RecruiterDashboard({ auth }: Props) {
                     <div style={{ marginTop: 16 }}>
                       <h4 style={{ margin: "0 0 6px", fontSize: 14 }}>Per-Question Breakdown</h4>
                       <div className="per-question-list">
-                        {result.perQuestion.map((pq) => (
+                        {result.perQuestion.map((pq) => {
+                          const competency = competencyForQuestion(pq, pq.questionIndex);
+                          return (
                           <div key={pq.questionIndex} className="per-question-item">
                             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                               <h4>Q{pq.questionIndex + 1}: {pq.question}</h4>
-                              <span className={`verdict-pill ${verdictClass(pq.verdict)}`}>{pq.verdict}</span>
+                              <div className="question-badges">
+                                <span className={`competency-pill compact ${competency.tone}`}>{competency.label}</span>
+                                <span className={`verdict-pill ${verdictClass(pq.verdict)}`}>{pq.verdict}</span>
+                              </div>
                             </div>
                             <div style={{ display: "flex", gap: 12, alignItems: "center", marginTop: 4 }}>
                               <span style={{ fontSize: 22, fontWeight: 800, color: "#146c63" }}>{pq.score}</span>
                               <span style={{ fontSize: 12, color: "#697780" }}>/ 100 • {pq.method === "llm" ? "AI Scored" : pq.method === "heuristic" ? "Heuristic" : "—"}</span>
                             </div>
+                            <p className="competency-note">{competency.description}</p>
                             {pq.summary && <p>{pq.summary}</p>}
                             {pq.dimensions && (
                               <div className="score-dimensions">
@@ -1240,7 +1327,8 @@ export function RecruiterDashboard({ auth }: Props) {
                             {pq.keyStrength && pq.keyStrength !== "N/A" && <p><strong>Strength:</strong> {pq.keyStrength}</p>}
                             {pq.keyImprovement && pq.keyImprovement !== "N/A" && <p><strong>Improve:</strong> {pq.keyImprovement}</p>}
                           </div>
-                        ))}
+                          );
+                        })}
                       </div>
                     </div>
                   )}
