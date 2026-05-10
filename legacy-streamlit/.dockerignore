@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.pyd
+.Python
+venv/
+.venv/
+venv310/
+env/
+ENV/
+
+# Build/runtime artifacts
+hf_cache/
+.pytest_cache/
+.mypy_cache/
+
+# Git and editor
+.git/
+.gitignore
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Notebook and docs artifacts
+*.ipynb
+.ipynb_checkpoints/
+
+# Logs and temp
+*.log
+logs/
+tmp/
+temp/
+*.tmp
+
+# Local environment files
+.env
+.env.*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Local nested training repo and heavy artifacts
+psysense-emotion-ai/

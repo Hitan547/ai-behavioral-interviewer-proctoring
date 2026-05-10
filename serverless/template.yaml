@@ -1,0 +1,526 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: Talentryx AI serverless MVP using approved AWS services only.
+
+Parameters:
+  StageName:
+    Type: String
+    Default: dev
+    AllowedPattern: "^[a-zA-Z0-9-]+$"
+  GroqApiKeyParameterName:
+    Type: String
+    Default: /psysense/dev/GROQ_API_KEY
+  N8nInviteWebhookParameterName:
+    Type: String
+    Default: /psysense/dev/N8N_INVITE_WEBHOOK
+  N8nResultWebhookParameterName:
+    Type: String
+    Default: /psysense/dev/N8N_RESULT_WEBHOOK
+  RazorpayKeyIdParameterName:
+    Type: String
+    Default: /psysense/dev/RAZORPAY_KEY_ID
+  RazorpayKeySecretParameterName:
+    Type: String
+    Default: /psysense/dev/RAZORPAY_KEY_SECRET
+  FrontendUrl:
+    Type: String
+    Default: http://localhost:5173
+
+Globals:
+  Function:
+    Runtime: python3.10
+    Timeout: 15
+    MemorySize: 256
+    Architectures:
+      - x86_64
+    Environment:
+      Variables:
+        POWERTOOLS_SERVICE_NAME: psysense-serverless
+        TABLE_NAME: !Ref PsySenseTable
+        ARTIFACT_BUCKET: !Ref ArtifactBucket
+        GROQ_API_KEY_PARAMETER_NAME: !Ref GroqApiKeyParameterName
+        N8N_INVITE_WEBHOOK_PARAMETER_NAME: !Ref N8nInviteWebhookParameterName
+        N8N_RESULT_WEBHOOK_PARAMETER_NAME: !Ref N8nResultWebhookParameterName
+        RAZORPAY_KEY_ID_PARAMETER_NAME: !Ref RazorpayKeyIdParameterName
+        RAZORPAY_KEY_SECRET_PARAMETER_NAME: !Ref RazorpayKeySecretParameterName
+
+Resources:
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub psysense-${StageName}-users
+      AutoVerifiedAttributes:
+        - email
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - Name: verified_email
+            Priority: 1
+      VerificationMessageTemplate:
+        DefaultEmailOption: CONFIRM_WITH_CODE
+      UsernameAttributes:
+        - email
+      Schema:
+        - Name: email
+          Required: true
+          Mutable: true
+        - Name: org_id
+          AttributeDataType: String
+          Mutable: true
+          StringAttributeConstraints:
+            MinLength: "1"
+            MaxLength: "80"
+        - Name: role
+          AttributeDataType: String
+          Mutable: true
+          StringAttributeConstraints:
+            MinLength: "1"
+            MaxLength: "40"
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub psysense-${StageName}-web
+      UserPoolId: !Ref UserPool
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: !Ref StageName
+      Auth:
+        DefaultAuthorizer: CognitoAuthorizer
+        Authorizers:
+          CognitoAuthorizer:
+            JwtConfiguration:
+              issuer: !Sub https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPool}
+              audience:
+                - !Ref UserPoolClient
+            IdentitySource: "$request.header.Authorization"
+      CorsConfiguration:
+        AllowOrigins:
+          - !Ref FrontendUrl
+          - http://localhost:5173
+        AllowHeaders:
+          - Authorization
+          - Content-Type
+        AllowMethods:
+          - GET
+          - POST
+          - PUT
+          - OPTIONS
+
+  PsySenseTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub psysense-${StageName}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: false
+
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub psysense-${StageName}-artifacts-${AWS::AccountId}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteTemporaryArtifacts
+            Status: Enabled
+            Prefix: artifacts/
+            ExpirationInDays: 30
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders:
+              - "*"
+            AllowedMethods:
+              - GET
+              - PUT
+            AllowedOrigins:
+              - !Ref FrontendUrl
+              - http://localhost:5173
+            MaxAge: 3600
+
+  RecruiterAuthFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub psysense-${StageName}-recruiter-auth
+      CodeUri: backend/
+      Handler: handlers.recruiter_auth.handler
+      Environment:
+        Variables:
+          USER_POOL_ID: !Ref UserPool
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref PsySenseTable
+        - Statement:
+            Effect: Allow
+            Action:
+              - cognito-idp:AdminCreateUser
+              - cognito-idp:AdminSetUserPassword
+            Resource: !Sub arn:${AWS::Partition}:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/${UserPool}
+      Events:
+        RecruiterSignup:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /auth/recruiter-signup
+            Method: POST
+            Auth:
+              Authorizer: NONE
+
+  JobsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub psysense-${StageName}-jobs
+      CodeUri: backend/
+      Handler: handlers.jobs.handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref PsySenseTable
+      Events:
+        CreateJob:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /jobs
+            Method: POST
+        ListJobs:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /jobs
+            Method: GET
+        GetJob:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /jobs/{jobId}
+            Method: GET
+        UpdateJob:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /jobs/{jobId}
+            Method: PUT
+        GetJobStats:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /jobs/{jobId}/stats
+            Method: GET
+
+  CandidatesFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub psysense-${StageName}-candidates
+      CodeUri: backend/
+      Handler: handlers.candidates.handler
+      Environment:
+        Variables:
+          FRONTEND_URL: !Ref FrontendUrl
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref PsySenseTable
+        - S3CrudPolicy:
+            BucketName: !Ref ArtifactBucket
+        - Statement:
+            Effect: Allow
+            Action:
+              - ssm:GetParameter
+            Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${N8nInviteWebhookParameterName}
+      Events:
+        CreateCandidate:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /jobs/{jobId}/candidates
+            Method: POST
+        ListCandidates:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /jobs/{jobId}/candidates
+            Method: GET
+        UpdateCandidate:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /jobs/{jobId}/candidates/{candidateId}
+            Method: PUT
+        SendInvite:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /jobs/{jobId}/candidates/{candidateId}/invite
+            Method: PUT
+        AllowRetest:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /jobs/{jobId}/candidates/{candidateId}/retest
+            Method: POST
+
+  CandidateAuthFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub psysense-${StageName}-candidate-auth
+      CodeUri: backend/
+      Handler: handlers.candidate_auth.handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref PsySenseTable
+      Events:
+        CandidateLogin:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /auth/candidate-login
+            Method: POST
+            Auth:
+              Authorizer: NONE
+
+  AnalyseResumesFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub psysense-${StageName}-analyse-resumes
+      CodeUri: backend/
+      Handler: handlers.analyse_resumes.handler
+      Timeout: 45
+      MemorySize: 512
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref PsySenseTable
+        - S3ReadPolicy:
+            BucketName: !Ref ArtifactBucket
+        - Statement:
+            Effect: Allow
+            Action:
+              - ssm:GetParameter
+            Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${GroqApiKeyParameterName}
+      Events:
+        AnalyseResumes:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /jobs/{jobId}/analyse-resumes
+            Method: POST
+
+  PrepareInterviewFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub psysense-${StageName}-prepare-interview
+      CodeUri: backend/
+      Handler: handlers.prepare_interview.handler
+      Timeout: 45
+      MemorySize: 512
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref PsySenseTable
+        - S3ReadPolicy:
+            BucketName: !Ref ArtifactBucket
+        - Statement:
+            Effect: Allow
+            Action:
+              - ssm:GetParameter
+            Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${GroqApiKeyParameterName}
+      Events:
+        PrepareInterview:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /jobs/{jobId}/candidates/{candidateId}/prepare-interview
+            Method: POST
+
+  CandidateInterviewFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub psysense-${StageName}-candidate-interview
+      CodeUri: backend/
+      Handler: handlers.candidate_interview.handler
+      Timeout: 45
+      MemorySize: 512
+      Environment:
+        Variables:
+          SCORING_WORKFLOW_ARN: !Ref ScoringWorkflow
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref PsySenseTable
+        - S3CrudPolicy:
+            BucketName: !Ref ArtifactBucket
+        - Statement:
+            Effect: Allow
+            Action:
+              - states:StartExecution
+            Resource: !Ref ScoringWorkflow
+        - Statement:
+            Effect: Allow
+            Action:
+              - ssm:GetParameter
+            Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${GroqApiKeyParameterName}
+      Events:
+        GetCandidateInterview:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /jobs/{jobId}/candidates/{candidateId}/interview
+            Method: GET
+            Auth:
+              Authorizer: NONE
+        SubmitCandidateInterview:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /jobs/{jobId}/candidates/{candidateId}/interview
+            Method: POST
+            Auth:
+              Authorizer: NONE
+        CreateAudioUpload:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /jobs/{jobId}/candidates/{candidateId}/audio-upload-url
+            Method: POST
+            Auth:
+              Authorizer: NONE
+        TranscribeQuestionAudio:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /jobs/{jobId}/candidates/{candidateId}/questions/{questionIndex}/transcribe
+            Method: POST
+            Auth:
+              Authorizer: NONE
+        TranscribePracticeAudio:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /transcribe-practice
+            Method: POST
+            Auth:
+              Authorizer: NONE
+
+  ScoringApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub psysense-${StageName}-scoring-api
+      CodeUri: backend/
+      Handler: handlers.scoring.handler
+      Environment:
+        Variables:
+          SCORING_WORKFLOW_ARN: !Ref ScoringWorkflow
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref PsySenseTable
+        - S3ReadPolicy:
+            BucketName: !Ref ArtifactBucket
+        - Statement:
+            Effect: Allow
+            Action:
+              - states:StartExecution
+            Resource: !Ref ScoringWorkflow
+      Events:
+        StartScoring:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /jobs/{jobId}/candidates/{candidateId}/score
+            Method: POST
+        GetScoringResult:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /jobs/{jobId}/candidates/{candidateId}/result
+            Method: GET
+
+  BillingFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub psysense-${StageName}-billing
+      CodeUri: backend/
+      Handler: handlers.billing.handler
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref PsySenseTable
+        - Statement:
+            Effect: Allow
+            Action:
+              - ssm:GetParameter
+            Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${RazorpayKeyIdParameterName}
+      Events:
+        GetBilling:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /billing
+            Method: GET
+
+  ScoringWorkerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub psysense-${StageName}-scoring-worker
+      CodeUri: backend/
+      Handler: handlers.scoring_worker.handler
+      Timeout: 45
+      MemorySize: 512
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref PsySenseTable
+        - S3CrudPolicy:
+            BucketName: !Ref ArtifactBucket
+        - Statement:
+            Effect: Allow
+            Action:
+              - ssm:GetParameter
+            Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${GroqApiKeyParameterName}
+
+  ScoringWorkflow:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Name: !Sub psysense-${StageName}-scoring-workflow
+      Definition:
+        StartAt: ScoreInterview
+        States:
+          ScoreInterview:
+            Type: Task
+            Resource: !GetAtt ScoringWorkerFunction.Arn
+            End: true
+      Policies:
+        - LambdaInvokePolicy:
+            FunctionName: !Ref ScoringWorkerFunction
+
+Outputs:
+  ApiEndpoint:
+    Description: API Gateway endpoint.
+    Value: !Sub https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}
+  UserPoolId:
+    Description: Cognito user pool id.
+    Value: !Ref UserPool
+  UserPoolClientId:
+    Description: Cognito web client id.
+    Value: !Ref UserPoolClient
+  FrontendUrl:
+    Description: Frontend URL configured for CORS and candidate invite links.
+    Value: !Ref FrontendUrl
+  TableName:
+    Description: DynamoDB table name.
+    Value: !Ref PsySenseTable
+  ArtifactBucketName:
+    Description: S3 artifact bucket name.
+    Value: !Ref ArtifactBucket
