@@ -178,37 +178,7 @@ function questionSignals(item: PerQuestion, riskPenalty: number) {
 }
 
 function competencyForQuestion(item: Pick<PerQuestion, "question">, index: number) {
-  const question = item.question.toLowerCase();
-  if (/(feedback|learn|adapt|pressure|priorities|growth|ramp)/.test(question)) {
-    return {
-      label: "Adaptability",
-      tone: "adaptability",
-      description: "Evidence of learning, resilience, and response to changing conditions.",
-    };
-  }
-  if (/(stakeholder|team|collaborat|conflict|disagree|communication|align|explain)/.test(question)) {
-    return {
-      label: "Teamwork & Communication",
-      tone: "teamwork",
-      description: "Evidence of collaboration, influence, conflict handling, and clarity with others.",
-    };
-  }
-  if (/(debug|root cause|problem|incident|tradeoff|failure|production|prevent)/.test(question)) {
-    return {
-      label: "Problem Solving",
-      tone: "problem",
-      description: "Evidence of structured thinking, troubleshooting, and sound tradeoff decisions.",
-    };
-  }
-  if (/(own|ownership|deliver|outcome|measure|responsibility|prioritize)/.test(question)) {
-    return {
-      label: "Ownership",
-      tone: "ownership",
-      description: "Evidence that the candidate takes responsibility and delivers measurable outcomes.",
-    };
-  }
-
-  const fallback = [
+  const orderedCompetencies = [
     {
       label: "Role Fit",
       tone: "role",
@@ -235,7 +205,24 @@ function competencyForQuestion(item: Pick<PerQuestion, "question">, index: numbe
       description: "Evidence of learning, resilience, and response to changing conditions.",
     },
   ];
-  return fallback[Math.min(index, fallback.length - 1)];
+  if (index >= 0 && index < orderedCompetencies.length) {
+    return orderedCompetencies[index];
+  }
+
+  const question = item.question.toLowerCase();
+  if (/(feedback|adapt|pressure|priorities|growth|ramp up|learned|learning quickly|learn quickly)/.test(question)) {
+    return orderedCompetencies[4];
+  }
+  if (/(stakeholder|team|collaborat|conflict|disagree|communication|align)/.test(question)) {
+    return orderedCompetencies[3];
+  }
+  if (/(debug|root cause|problem|incident|tradeoff|failure|production|prevent)/.test(question)) {
+    return orderedCompetencies[2];
+  }
+  if (/(own|ownership|deliver|outcome|measure|responsibility|prioritize)/.test(question)) {
+    return orderedCompetencies[1];
+  }
+  return orderedCompetencies[0];
 }
 
 function candidateMatchesStatus(candidate: Candidate, status: string) {
