@@ -75,6 +75,49 @@ The product is built as a human-in-the-loop decision-support platform. AI scores
 | Dashboard | Candidate status filters, final shortlist, reports, scorecards, proctoring risk, billing foundation |
 | Deployment direction | AWS serverless only, under the CEO-approved resource guardrails |
 
+## SaaS Positioning
+
+Talentryx AI is positioned as an AI-assisted first-round screening platform, not as an autonomous hiring decision engine. The strongest commercial wedge is high-volume early screening where recruiters need speed, consistency, and reviewable evidence.
+
+Best-fit initial markets:
+
+- Campus placement drives.
+- Internship and fresher hiring.
+- Small-to-mid startup recruitment.
+- Training institute placement screening.
+- High-volume role screening where live interviews are expensive to run manually.
+
+What makes the product commercially meaningful:
+
+| Business Pain | Product Response |
+| --- | --- |
+| Recruiters spend hours manually screening resumes | JD-to-resume matching and shortlist generation |
+| First-round interviews are repetitive | Structured AI-assisted behavioral interview flow |
+| Candidate quality is hard to compare consistently | Standardized scorecards and question-level breakdowns |
+| Remote screening has integrity concerns | Browser proctoring and session risk signals |
+| Recruiters do not trust black-box AI | Explainable reports, strengths, concerns, transcripts, and human review positioning |
+| Campus drives have many candidates and few recruiter hours | Final shortlist ranking by interview score and open positions |
+
+Current commercial readiness:
+
+| Dimension | Status |
+| --- | --- |
+| Technical MVP | Strong: full recruiter/candidate workflow exists |
+| SaaS architecture | Strong: serverless AWS direction with tenant-aware data design |
+| Compliance posture | Early but responsible: consent, privacy, proctoring notice, and decision-support language |
+| Sales readiness | Pilot-ready, not enterprise-ready |
+| Biggest validation gap | Proving scoring quality against human recruiter review |
+
+Before real paid rollout, the product should collect outcome proof:
+
+- Time saved per recruiter per hiring drive.
+- AI score correlation with human reviewer scores.
+- Shortlist acceptance rate after recruiter review.
+- Candidate completion rate and drop-off reasons.
+- False-positive/false-negative review of proctoring risk.
+
+This keeps the product story honest: Talentryx AI is already more than a demo, but the next milestone is measured pilot validation.
+
 ## Why This Exists
 
 High-volume hiring teams often need a repeatable way to evaluate communication, job fit, role understanding, and behavioral evidence before live interview rounds. Manual screening is slow, inconsistent, and difficult to audit.
