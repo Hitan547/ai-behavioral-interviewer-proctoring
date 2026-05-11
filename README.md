@@ -12,7 +12,7 @@ Talentryx AI helps recruiters run structured hiring drives: create jobs, analyze
   </a>
   <img alt="AWS Serverless" src="https://img.shields.io/badge/AWS-Serverless-FF9900?style=for-the-badge&logo=amazonaws&logoColor=white">
   <img alt="Human in the loop" src="https://img.shields.io/badge/Human--in--the--Loop-Decision%20Support-0F766E?style=for-the-badge">
-  <img alt="Status" src="https://img.shields.io/badge/Status-Pilot--Ready%20MVP-2563EB?style=for-the-badge">
+  <img alt="Status" src="https://img.shields.io/badge/Status-AWS--Verified%20MVP-2563EB?style=for-the-badge">
 </p>
 
 <p>
@@ -73,7 +73,7 @@ The product is built as a human-in-the-loop decision-support platform. AI scores
 | AI assessment | Resume/JD-aware questions, transcription, STAR-style behavioral scoring, final recommendation |
 | Proctoring | Tab switch detection, fullscreen exits, copy/paste attempts, devtools attempts, face visibility and multi-face events |
 | Dashboard | Candidate status filters, final shortlist, reports, scorecards, proctoring risk, billing foundation |
-| Deployment direction | AWS serverless only, under the CEO-approved resource guardrails |
+| Deployment direction | AWS serverless backend verified; public frontend hosting is the next production-demo step |
 
 ## SaaS Positioning
 
@@ -144,6 +144,26 @@ This repository contains two generations of the product:
 ```
 
 The active product is `serverless/`.
+
+Current verified state:
+
+- AWS backend stack is deployed and working through API Gateway, Lambda, DynamoDB, Cognito, S3, Step Functions, and SSM Parameter Store.
+- Local Vite frontend can run at `http://localhost:5173` while calling the deployed AWS backend.
+- Recruiter signup/login, job creation, candidate creation, invite flow, candidate interview, scoring, report retrieval, retest flow, and dashboard review have been smoke tested against AWS.
+- Groq is configured through SSM for question generation, transcription, resume analysis, and scoring.
+- n8n invite/result webhook parameters are configured through SSM; no webhook secrets are committed to the repo.
+- Frontend production build and serverless backend tests are passing.
+
+Current demo mode:
+
+```text
+React/Vite frontend on localhost:5173
+        |
+        v
+AWS API Gateway / Lambda / DynamoDB / Cognito / S3 / Step Functions
+```
+
+This is a valid AWS-backend demo. The next step for a public demo is hosting the frontend on S3 + CloudFront and redeploying the backend with `FrontendUrl` set to that public URL.
 
 The `legacy-streamlit/` folder is kept only as a reference for the original prototype, older dashboard ideas, and previous local demo behavior.
 
@@ -451,7 +471,7 @@ serverless/
 
 ## Local Development
 
-Start the serverless frontend:
+Start the serverless frontend in local API mode:
 
 ```powershell
 cd serverless\frontend
@@ -469,6 +489,31 @@ python local_server.py
 The local API wraps the same Lambda handler code used by AWS, but mocks cloud services where needed.
 
 For more detail, read [serverless/RUN_LOCAL.md](serverless/RUN_LOCAL.md).
+
+## AWS-Connected Frontend Demo
+
+After the backend stack is deployed, the frontend can be run locally while using the real AWS backend.
+
+Create `serverless/frontend/.env.local`:
+
+```env
+VITE_API_BASE_URL=<ApiEndpoint output from SAM/CloudFormation>
+VITE_COGNITO_USER_POOL_ID=<UserPoolId output>
+VITE_COGNITO_CLIENT_ID=<UserPoolClientId output>
+VITE_LOCAL_DEV=false
+```
+
+Then run:
+
+```powershell
+cd serverless\frontend
+npm.cmd run build
+npm.cmd run dev -- --host localhost --port 5173 --strictPort
+```
+
+When `VITE_LOCAL_DEV=false`, the login page hides local demo shortcuts and prefers the deployed AWS API/Cognito configuration over stale browser storage.
+
+Important: the deployed backend `FrontendUrl` parameter must match the frontend origin. For the local AWS-connected demo, use `http://localhost:5173`. For a public demo, redeploy the backend with the CloudFront or custom-domain URL.
 
 ## Legacy Streamlit Prototype
 
@@ -514,9 +559,31 @@ python -m compileall -q serverless\backend serverless\local_server.py
 python -m pytest tests\test_serverless_*.py
 ```
 
+On Windows PowerShell, if pytest does not expand the glob, use:
+
+```powershell
+$tests = Get-ChildItem tests -Filter "test_serverless_*.py" | ForEach-Object { $_.FullName }
+python -m pytest @tests
+```
+
+Recent verification:
+
+- Frontend build: passing.
+- Serverless backend tests: `30 passed`.
+- AWS dev backend smoke test: recruiter, candidate, interview, scoring, report, and dashboard flow verified.
+
 ## Deployment Readiness
 
-Before AWS deployment:
+The AWS backend has been deployed and verified for a dev/pilot environment. The current public-demo gap is frontend hosting.
+
+Current backend deployment uses:
+
+- SAM / CloudFormation stack for API, auth, storage, and workflow resources.
+- SSM Parameter Store for Groq, n8n, and billing provider config references.
+- n8n webhook for candidate invite delivery.
+- Local Vite frontend connected to the deployed AWS backend for the current demo.
+
+Before a fresh AWS deployment:
 
 1. Get permission for the required IAM/SAM deployment actions.
 2. Store private values in SSM Parameter Store.
@@ -526,6 +593,14 @@ Before AWS deployment:
 6. Deploy the backend stack.
 7. Connect frontend environment values from stack outputs.
 8. Smoke test recruiter signup/login, job creation, invites, candidate login, interview, scoring, and report retrieval.
+
+For a public demo:
+
+1. Build the frontend with the deployed API/Cognito values.
+2. Upload `serverless/frontend/dist` to an approved S3 static hosting bucket.
+3. Put CloudFront in front of the S3 bucket for HTTPS.
+4. Redeploy the backend with `FrontendUrl=<CloudFront-or-custom-domain URL>`.
+5. Re-test invite links, CORS, candidate login, interview completion, and report retrieval from the public URL.
 
 See [serverless/DEPLOYMENT_CHECKLIST.md](serverless/DEPLOYMENT_CHECKLIST.md).
 
@@ -566,8 +641,9 @@ Important: production use still requires final legal review, data retention deci
 Near term:
 
 - Keep CI green.
-- Complete AWS deployment once permissions are available.
-- Verify full production flow with one recruiter and one candidate.
+- Host the frontend on S3 + CloudFront for a public demo.
+- Redeploy the backend with `FrontendUrl` set to the public frontend URL.
+- Run one final public URL smoke test with a new recruiter, job, candidate invite, interview, scoring run, and report.
 - Finalize n8n email template with Talentryx AI branding.
 - Add clearer audit/retest visibility in the recruiter dashboard.
 
