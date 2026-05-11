@@ -155,10 +155,20 @@ export function LoginPage({ auth }: Props) {
   }
 
   function handleDemoMode() {
+    if (!auth.localDevEnabled) {
+      setStatusType("error");
+      setStatus("Demo mode is disabled for this deployed backend environment.");
+      return;
+    }
     auth.enterDemoMode();
   }
 
   function handleLocalDev() {
+    if (!auth.localDevEnabled) {
+      setStatusType("error");
+      setStatus("Local dev login is disabled for this deployed backend environment.");
+      return;
+    }
     // Set API to local server, fake token, real org — NOT demo mode
     auth.setApiBaseUrl("http://localhost:3001");
     auth.setAccessToken("local-dev-token");
@@ -283,7 +293,9 @@ export function LoginPage({ auth }: Props) {
               Create Account & Start Free Trial →
             </button>
             <p className="auth-helper-text">
-              AWS deployment uses Cognito email identity and account recovery. Local dev signs in immediately for testing.
+              {auth.localDevEnabled
+                ? "AWS deployment uses Cognito email identity and account recovery. Local dev signs in immediately for testing."
+                : "AWS deployment uses Cognito email identity and account recovery."}
             </p>
           </div>
         )}
@@ -295,29 +307,42 @@ export function LoginPage({ auth }: Props) {
           </div>
         )}
 
-        {/* Local dev mode */}
-        <div className="login-demo-section">
-          <div className="login-divider">
-            <span>local development</span>
-          </div>
-          <button className="login-demo-btn" onClick={handleLocalDev} style={{ background: "linear-gradient(135deg, #2563eb, #1d4ed8)" }}>
-            <Server size={17} />
-            Local Dev Login
-          </button>
-          <p className="login-demo-hint">Recruiter access to local_server.py (localhost:3001) — no Cognito needed.</p>
-        </div>
+        {auth.localDevEnabled && (
+          <>
+            {/* Local dev mode */}
+            <div className="login-demo-section">
+              <div className="login-divider">
+                <span>local development</span>
+              </div>
+              <button className="login-demo-btn" onClick={handleLocalDev} style={{ background: "linear-gradient(135deg, #2563eb, #1d4ed8)" }}>
+                <Server size={17} />
+                Local Dev Login
+              </button>
+              <p className="login-demo-hint">Recruiter access to local_server.py (localhost:3001) — no Cognito needed.</p>
+            </div>
 
-        {/* Demo mode */}
-        <div className="login-demo-section">
-          <div className="login-divider">
-            <span>or</span>
+            {/* Demo mode */}
+            <div className="login-demo-section">
+              <div className="login-divider">
+                <span>or</span>
+              </div>
+              <button className="login-demo-btn" onClick={handleDemoMode}>
+                <Play size={17} />
+                Explore Demo Dashboard
+              </button>
+              <p className="login-demo-hint">No account needed — explore the full recruiter & candidate UI with sample data.</p>
+            </div>
+          </>
+        )}
+
+        {!auth.localDevEnabled && (
+          <div className="login-demo-section">
+            <div className="login-divider">
+              <span>deployment mode</span>
+            </div>
+            <p className="login-demo-hint">Connected to the AWS backend. Use recruiter signup/login or candidate invite credentials.</p>
           </div>
-          <button className="login-demo-btn" onClick={handleDemoMode}>
-            <Play size={17} />
-            Explore Demo Dashboard
-          </button>
-          <p className="login-demo-hint">No account needed — explore the full recruiter & candidate UI with sample data.</p>
-        </div>
+        )}
 
         {/* Settings toggle */}
         <div className="login-settings-section">

@@ -12,6 +12,7 @@ export type AuthSession = {
   candidateJobId: string;
   candidateId: string;
   isDemoMode: boolean;
+  localDevEnabled: boolean;
   setAccessToken: (value: string) => void;
   setIdToken: (value: string) => void;
   setApiBaseUrl: (value: string) => void;
@@ -28,24 +29,31 @@ export type AuthSession = {
   authHeaders: () => HeadersInit;
 };
 
+const envApiBaseUrl = (import.meta.env.VITE_API_BASE_URL || "").trim();
+const envUserPoolId = (import.meta.env.VITE_COGNITO_USER_POOL_ID || "").trim();
+const envClientId = (import.meta.env.VITE_COGNITO_CLIENT_ID || "").trim();
+const envLocalDev = import.meta.env.VITE_LOCAL_DEV;
+const localDevEnabled = envLocalDev === "true" || (!envApiBaseUrl && envLocalDev !== "false");
+
+function initialConfigValue(storageKey: string, envValue: string) {
+  const storedValue = localStorage.getItem(storageKey) || "";
+  return localDevEnabled ? storedValue || envValue : envValue || storedValue;
+}
+
 export function useAuthSession(): AuthSession {
-  const [apiBaseUrl, setApiBaseUrlState] = useState(
-    localStorage.getItem("psysense.apiBaseUrl") || import.meta.env.VITE_API_BASE_URL || "",
-  );
+  const [apiBaseUrl, setApiBaseUrlState] = useState(initialConfigValue("psysense.apiBaseUrl", envApiBaseUrl));
   const [accessToken, setAccessTokenState] = useState(localStorage.getItem("psysense.accessToken") || "");
   const [idToken, setIdTokenState] = useState(localStorage.getItem("psysense.idToken") || "");
-  const [userPoolId, setUserPoolIdState] = useState(
-    localStorage.getItem("psysense.userPoolId") || import.meta.env.VITE_COGNITO_USER_POOL_ID || "",
-  );
-  const [clientId, setClientIdState] = useState(
-    localStorage.getItem("psysense.clientId") || import.meta.env.VITE_COGNITO_CLIENT_ID || "",
-  );
+  const [userPoolId, setUserPoolIdState] = useState(initialConfigValue("psysense.userPoolId", envUserPoolId));
+  const [clientId, setClientIdState] = useState(initialConfigValue("psysense.clientId", envClientId));
   const [orgId, setOrgIdState] = useState(localStorage.getItem("psysense.orgId") || "");
   const [role, setRoleState] = useState(localStorage.getItem("psysense.role") || "recruiter");
   const [username, setUsernameState] = useState(localStorage.getItem("psysense.username") || "");
   const [candidateJobId, setCandidateJobIdState] = useState(localStorage.getItem("psysense.candidateJobId") || "");
   const [candidateId, setCandidateIdState] = useState(localStorage.getItem("psysense.candidateId") || "");
-  const [isDemoMode, setIsDemoMode] = useState(localStorage.getItem("psysense.demoMode") === "true");
+  const [isDemoMode, setIsDemoMode] = useState(
+    localDevEnabled && localStorage.getItem("psysense.demoMode") === "true",
+  );
 
   return useMemo(
     () => ({
@@ -60,6 +68,7 @@ export function useAuthSession(): AuthSession {
       candidateJobId,
       candidateId,
       isDemoMode,
+      localDevEnabled,
       setApiBaseUrl(value: string) {
         localStorage.setItem("psysense.apiBaseUrl", value.trim());
         setApiBaseUrlState(value.trim());
@@ -121,6 +130,7 @@ export function useAuthSession(): AuthSession {
         setIsDemoMode(false);
       },
       enterDemoMode() {
+        if (!localDevEnabled) return;
         localStorage.setItem("psysense.demoMode", "true");
         localStorage.setItem("psysense.username", "demo@talentryx.ai");
         localStorage.setItem("psysense.orgId", "demo-org");
