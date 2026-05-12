@@ -625,6 +625,12 @@ Important: production use still requires final legal review, data retention deci
 | Document | Purpose |
 | --- | --- |
 | [docs/REPOSITORY_STRUCTURE.md](docs/REPOSITORY_STRUCTURE.md) | Repo layout and why legacy Streamlit is separated |
+| [docs/PRODUCTION_READINESS.md](docs/PRODUCTION_READINESS.md) | Current AWS MVP readiness, public-demo blocker, and SaaS gaps |
+| [docs/PUBLIC_FRONTEND_DEPLOYMENT.md](docs/PUBLIC_FRONTEND_DEPLOYMENT.md) | S3 + CloudFront frontend deployment plan and required permissions |
+| [docs/SECURITY_REVIEW.md](docs/SECURITY_REVIEW.md) | Production security checklist and known gaps |
+| [docs/MONITORING_AND_ALERTING.md](docs/MONITORING_AND_ALERTING.md) | CloudWatch alarm and operations runbook plan |
+| [docs/DATA_RETENTION_RUNBOOK.md](docs/DATA_RETENTION_RUNBOOK.md) | Data types, retention recommendations, and deletion workflow |
+| [docs/BILLING_AND_ORG_ADMIN_PLAN.md](docs/BILLING_AND_ORG_ADMIN_PLAN.md) | Billing enforcement and organization admin roadmap |
 | [serverless/README.md](serverless/README.md) | Serverless implementation notes |
 | [serverless/RUN_LOCAL.md](serverless/RUN_LOCAL.md) | Local serverless development flow |
 | [serverless/DEPLOYMENT_CHECKLIST.md](serverless/DEPLOYMENT_CHECKLIST.md) | AWS deployment checklist |
