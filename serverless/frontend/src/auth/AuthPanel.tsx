@@ -1,4 +1,4 @@
-import { ChevronDown, ChevronUp, Eye, EyeOff, KeyRound, Play, Server, Settings } from "lucide-react";
+import { Eye, EyeOff, KeyRound, Play, Server } from "lucide-react";
 import { useState } from "react";
 import { ApiClient } from "../api/client";
 import { claimsValue, signInWithCognito } from "./cognito";
@@ -17,7 +17,6 @@ export function LoginPage({ auth }: Props) {
   const [showPassword, setShowPassword] = useState(false);
   const [status, setStatus] = useState("");
   const [statusType, setStatusType] = useState<"error" | "success">("error");
-  const [showSettings, setShowSettings] = useState(false);
 
   // Signup fields
   const [orgName, setOrgName] = useState("");
@@ -65,7 +64,7 @@ export function LoginPage({ auth }: Props) {
         return;
       }
       if (!auth.userPoolId || !auth.clientId) {
-        throw new Error("Open Settings below and enter your Cognito User Pool ID and Client ID.");
+        throw new Error("Authentication is not configured. Please contact the administrator.");
       }
       const result = await signInWithCognito(
         { userPoolId: auth.userPoolId, clientId: auth.clientId },
@@ -96,7 +95,7 @@ export function LoginPage({ auth }: Props) {
       const apiBaseUrl = apiBaseForLocalDemo();
       if (!isLocalApi(apiBaseUrl)) {
         if (!auth.userPoolId || !auth.clientId) {
-          throw new Error("Open Settings below and enter your Cognito User Pool ID and Client ID.");
+          throw new Error("Authentication is not configured. Please contact the administrator.");
         }
         const api = new ApiClient({ ...auth, apiBaseUrl });
         const created = await api.recruiterSignup({ email, password, orgName });
@@ -334,52 +333,6 @@ export function LoginPage({ auth }: Props) {
             </div>
           </>
         )}
-
-        {!auth.localDevEnabled && (
-          <div className="login-demo-section">
-            <div className="login-divider">
-              <span>deployment mode</span>
-            </div>
-            <p className="login-demo-hint">Connected to the AWS backend. Use recruiter signup/login or candidate invite credentials.</p>
-          </div>
-        )}
-
-        {/* Settings toggle */}
-        <div className="login-settings-section">
-          <button className="login-settings-toggle" onClick={() => setShowSettings(!showSettings)}>
-            <Settings size={14} />
-            AWS Settings
-            {showSettings ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-          </button>
-          {showSettings && (
-            <div className="login-settings-grid">
-              <label>
-                <span><Server size={14} /> API URL</span>
-                <input
-                  value={auth.apiBaseUrl}
-                  placeholder="https://api-id.execute-api.us-east-1.amazonaws.com/dev"
-                  onChange={(e) => auth.setApiBaseUrl(e.target.value)}
-                />
-              </label>
-              <label>
-                <span>User Pool ID</span>
-                <input
-                  value={auth.userPoolId}
-                  placeholder="us-east-1_example"
-                  onChange={(e) => auth.setUserPoolId(e.target.value)}
-                />
-              </label>
-              <label>
-                <span>Client ID</span>
-                <input
-                  value={auth.clientId}
-                  placeholder="Cognito app client id"
-                  onChange={(e) => auth.setClientId(e.target.value)}
-                />
-              </label>
-            </div>
-          )}
-        </div>
 
         <div className="login-legal-links" aria-label="Legal links">
           <a href="?page=privacy">Privacy</a>

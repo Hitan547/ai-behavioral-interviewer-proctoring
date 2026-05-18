@@ -24,8 +24,8 @@ PLAN_CATALOG: list[dict[str, Any]] = [
     {
         "id": "starter",
         "name": "Starter",
-        "priceLabel": "INR 8,250/mo",
-        "amountPaise": 825000,
+        "priceLabel": "INR 2,999/mo",
+        "amountPaise": 299900,
         "monthlyInterviewLimit": 100,
         "features": [
             "100 interviews per month",
@@ -37,8 +37,8 @@ PLAN_CATALOG: list[dict[str, Any]] = [
     {
         "id": "pro",
         "name": "Pro",
-        "priceLabel": "INR 24,900/mo",
-        "amountPaise": 2490000,
+        "priceLabel": "INR 9,999/mo",
+        "amountPaise": 999900,
         "monthlyInterviewLimit": 500,
         "popular": True,
         "features": [
