@@ -592,6 +592,8 @@ textarea { min-height: 120px; resize: vertical; }
   display: flex; align-items: center; justify-content: space-between; gap: 16px;
 }
 .back-btn, .report-download { width: auto; min-height: 40px; }
+.report-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
+.report-actions .secondary-btn { width: auto; min-height: 40px; }
 .report-title-row h3 { margin: 0; font-size: 30px; color: #17202a; letter-spacing: 0; }
 .report-title-row p { margin: 5px 0 0; color: #697780; font-size: 13px; }
 .report-verdict {
@@ -693,6 +695,21 @@ textarea { min-height: 120px; resize: vertical; }
 .chart-legend { display: flex; gap: 16px; flex-wrap: wrap; padding-left: 42px; }
 .chart-legend span { display: inline-flex; align-items: center; gap: 6px; color: #334155; font-size: 12px; }
 .chart-legend i { width: 18px; height: 3px; border-radius: 999px; display: inline-block; }
+.analytics-grid { display: grid; gap: 14px; grid-template-columns: repeat(2, minmax(0, 1fr)); margin-top: 16px; }
+.analytics-card { border: 1px solid #dbe3ea; border-radius: 8px; background: #fff; padding: 18px; min-width: 0; }
+.analytics-card.wide { grid-column: span 1; }
+.analytics-card .panel-title { margin-bottom: 12px; }
+.analytics-card h4 { color: #0f172a; font-size: 16px; margin: 0; }
+.analytics-bar-row, .analytics-rank-row { align-items: center; border-top: 1px solid #eef2f7; display: grid; gap: 12px; padding: 10px 0; }
+.analytics-bar-row { grid-template-columns: 140px 1fr 36px; }
+.analytics-bar-row:first-of-type, .analytics-rank-row:first-of-type { border-top: 0; }
+.analytics-bar-row span, .analytics-rank-row p { color: #64748b; font-size: 13px; margin: 0; }
+.analytics-bar-row strong, .analytics-rank-row strong { color: #0f172a; font-size: 14px; }
+.analytics-bar-track { background: #eef6f4; border-radius: 999px; height: 9px; overflow: hidden; }
+.analytics-bar-track i { background: linear-gradient(90deg, #2563eb, #0f766e); border-radius: inherit; display: block; height: 100%; }
+.analytics-rank-row { grid-template-columns: 34px 1fr auto; }
+.analytics-rank-row > span { align-items: center; background: #eef6f4; border-radius: 999px; color: #0f766e; display: inline-flex; font-weight: 800; height: 28px; justify-content: center; width: 28px; }
+.analytics-table-wrap { overflow-x: auto; }
 .report-integrity { margin-top: 0; }
 .report-questions { display: grid; gap: 10px; }
 .report-question {

@@ -60,9 +60,6 @@ Resources:
       UsernameAttributes:
         - email
       Schema:
-        - Name: email
-          Required: true
-          Mutable: true
         - Name: org_id
           AttributeDataType: String
           Mutable: true
@@ -102,7 +99,6 @@ Resources:
       CorsConfiguration:
         AllowOrigins:
           - !Ref FrontendUrl
-          - http://localhost:5173
         AllowHeaders:
           - Authorization
           - Content-Type
@@ -154,7 +150,6 @@ Resources:
               - PUT
             AllowedOrigins:
               - !Ref FrontendUrl
-              - http://localhost:5173
             MaxAge: 3600
 
   RecruiterAuthFunction:

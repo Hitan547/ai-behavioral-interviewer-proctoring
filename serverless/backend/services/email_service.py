@@ -6,8 +6,18 @@ import json
 import os
 import urllib.error
 import urllib.request
-from urllib.parse import urlencode
 from typing import Any
+from urllib.parse import urlencode, urlparse
+
+
+_PLACEHOLDER_WEBHOOK_VALUES = {
+    "PLACEHOLDER_NOT_SET",
+    "TODO",
+    "TODO_REPLACE_ME",
+    "CHANGE_ME",
+    "NONE",
+    "NULL",
+}
 
 
 def send_interview_invite(
@@ -116,7 +126,7 @@ def _send_invite_via_n8n(
 
 
 def _get_invite_webhook_url() -> str:
-    webhook_url = os.environ.get("N8N_INVITE_WEBHOOK", "").strip()
+    webhook_url = _normalise_invite_webhook_url(os.environ.get("N8N_INVITE_WEBHOOK", ""))
     if webhook_url:
         return webhook_url
     parameter_name = os.environ.get("N8N_INVITE_WEBHOOK_PARAMETER_NAME", "").strip()
@@ -124,12 +134,26 @@ def _get_invite_webhook_url() -> str:
         try:
             import boto3  # type: ignore
             response = boto3.client("ssm").get_parameter(Name=parameter_name, WithDecryption=True)
-            value = str(response.get("Parameter", {}).get("Value", "")).strip()
+            value = _normalise_invite_webhook_url(response.get("Parameter", {}).get("Value", ""))
             if value:
                 return value
+        except RuntimeError:
+            raise
         except Exception:
             pass
     return ""
+
+
+def _normalise_invite_webhook_url(value: Any) -> str:
+    webhook_url = str(value or "").strip()
+    if not webhook_url or webhook_url.upper() in _PLACEHOLDER_WEBHOOK_VALUES:
+        return ""
+    parsed = urlparse(webhook_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise RuntimeError(
+            "Candidate invite webhook is invalid. Set N8N_INVITE_WEBHOOK to a full https:// webhook URL in SSM Parameter Store."
+        )
+    return webhook_url
 
 
 def build_interview_url(

@@ -370,6 +370,7 @@ function CandidateFullReport({
   result,
   expandedQuestion,
   onToggleQuestion,
+  onRegeneratePdf,
   onBack,
 }: {
   candidate: Candidate;
@@ -377,6 +378,7 @@ function CandidateFullReport({
   result: DetailedResult;
   expandedQuestion: number | null;
   onToggleQuestion: (index: number) => void;
+  onRegeneratePdf: () => void;
   onBack: () => void;
 }) {
   const decision = decisionFor(result);
@@ -392,11 +394,16 @@ function CandidateFullReport({
     <section className="full-report">
       <div className="report-header">
         <button className="secondary-btn back-btn" onClick={onBack}><ArrowLeft size={16} /> Back to candidates</button>
-        {result.reportDownload && (
-          <a className="button-link report-download" href={result.reportDownload.url}>
-            <Download size={17} /> PDF
-          </a>
-        )}
+        <div className="report-actions">
+          <button className="secondary-btn" onClick={onRegeneratePdf}>
+            <RefreshCw size={16} /> Regenerate PDF
+          </button>
+          {result.reportDownload && (
+            <a className="button-link report-download" href={result.reportDownload.url}>
+              <Download size={17} /> PDF
+            </a>
+          )}
+        </div>
       </div>
 
       <div className="report-title-row">
@@ -620,8 +627,8 @@ function demoBillingSummary(
     },
     plans: [
       { id: "trial", name: "Trial", priceLabel: "Free pilot", amountPaise: 0, monthlyInterviewLimit: 50, features: ["50 interviews per month", "Candidate reports", "Basic recruiter dashboard", "Proctoring signals"] },
-      { id: "starter", name: "Starter", priceLabel: "INR 8,250/mo", amountPaise: 825000, monthlyInterviewLimit: 100, features: ["100 interviews per month", "Multi-user recruiter access", "PDF candidate reports", "Email support"] },
-      { id: "pro", name: "Pro", priceLabel: "INR 24,900/mo", amountPaise: 2490000, monthlyInterviewLimit: 500, popular: true, features: ["500 interviews per month", "Advanced analytics", "API and webhook readiness", "Priority support"] },
+      { id: "starter", name: "Starter", priceLabel: "INR 2,999/mo", amountPaise: 299900, monthlyInterviewLimit: 100, features: ["100 interviews per month", "Multi-user recruiter access", "PDF candidate reports", "Email support"] },
+      { id: "pro", name: "Pro", priceLabel: "INR 9,999/mo", amountPaise: 999900, monthlyInterviewLimit: 500, popular: true, features: ["500 interviews per month", "Advanced analytics", "API and webhook readiness", "Priority support"] },
       { id: "enterprise", name: "Enterprise", priceLabel: "Custom", amountPaise: 0, monthlyInterviewLimit: null, features: ["Custom interview volume", "Dedicated account manager", "Security and procurement support", "Custom integrations"] },
     ],
     events: [{
@@ -802,6 +809,23 @@ export function RecruiterDashboard({ auth }: Props) {
     }
   }
 
+  async function regeneratePdfFor(candidate: Candidate) {
+    if (isDemo) {
+      setMessage("Demo reports are generated locally. Live PDF regeneration is available in AWS mode.");
+      return;
+    }
+    setBusy("Regenerate PDF");
+    setMessage("");
+    try {
+      await api.startScoring(candidate.jobId, candidate.candidateId);
+      setMessage("Report regeneration has started. Wait a moment, refresh candidates, then open Full Report and PDF again.");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not regenerate the report.");
+    } finally {
+      setBusy("");
+    }
+  }
+
   async function allowRetestFor(candidate: Candidate) {
     if (!canAllowRetest(candidate)) {
       throw new Error("Retest is only available after a candidate has submitted an interview.");
@@ -896,6 +920,49 @@ export function RecruiterDashboard({ auth }: Props) {
     ["High", "Critical"].includes(c.latestIntegrityRiskLevel || "") || (c.latestIntegrityPenalty ?? 0) > 0
   )).length;
   const shortlistedCount = candidates.filter((c) => c.shortlisted || c.interviewStatus === "Shortlisted").length;
+  const statusBreakdown = useMemo(() => {
+    const order = ["Invited", "In Progress", "Interview Submitted", "Scored", "Passed", "Review Required", "Below Threshold", "Expired"];
+    const counts = new Map<string, number>();
+    candidates.forEach((candidate) => {
+      counts.set(candidate.interviewStatus, (counts.get(candidate.interviewStatus) || 0) + 1);
+    });
+    return order
+      .filter((status) => counts.has(status))
+      .map((status) => ({ status, count: counts.get(status) || 0 }));
+  }, [candidates]);
+  const jobAnalytics = useMemo(() => jobs.map((job) => {
+    const jobCandidates = candidates.filter((candidate) => candidate.jobId === job.jobId);
+    const scored = jobCandidates.filter((candidate) => typeof candidate.latestResultScore === "number");
+    const passed = scored.filter((candidate) => (
+      candidate.latestAssessmentStatus === "Passed" || (candidate.latestResultScore ?? 0) >= (job.minPassScore ?? 60)
+    ));
+    return {
+      job,
+      total: jobCandidates.length,
+      scored: scored.length,
+      avg: scored.length
+        ? Math.round(scored.reduce((total, candidate) => total + (candidate.latestResultScore ?? 0), 0) / scored.length)
+        : null,
+      passRate: scored.length ? Math.round((passed.length / scored.length) * 100) : null,
+    };
+  }).filter((item) => item.total > 0), [candidates, jobs]);
+  const collegeAnalytics = useMemo(() => Array.from(candidates.reduce((map, candidate) => {
+    const college = candidate.collegeName || "Unassigned";
+    const entry = map.get(college) || { college, total: 0, scored: 0, scoreTotal: 0 };
+    entry.total += 1;
+    if (typeof candidate.latestResultScore === "number") {
+      entry.scored += 1;
+      entry.scoreTotal += candidate.latestResultScore;
+    }
+    map.set(college, entry);
+    return map;
+  }, new Map<string, { college: string; total: number; scored: number; scoreTotal: number }>()).values())
+    .sort((a, b) => b.total - a.total || a.college.localeCompare(b.college))
+    .slice(0, 5), [candidates]);
+  const topInterviewScores = scoredCandidates
+    .slice()
+    .sort((a, b) => (b.latestResultScore ?? 0) - (a.latestResultScore ?? 0))
+    .slice(0, 5);
   const selectedJob = jobs.find((job) => job.jobId === selectedJobId);
   const shortlistThresholdCopy = selectedJob
     ? `Top ${openPositionsForJob(selectedJob)} for ${selectedJob.openPositions ?? 10} open position(s), pass ${selectedJob.minPassScore}/100`
@@ -1002,6 +1069,7 @@ export function RecruiterDashboard({ auth }: Props) {
               result={reportResult}
               expandedQuestion={expandedQuestion}
               onToggleQuestion={(index) => setExpandedQuestion(expandedQuestion === index ? null : index)}
+              onRegeneratePdf={() => void regeneratePdfFor(reportCandidate)}
               onBack={() => {
                 setReportCandidate(null);
                 setReportResult(null);
@@ -1647,9 +1715,90 @@ export function RecruiterDashboard({ auth }: Props) {
             <div className="metric-card"><span className="mc-label">ACTIVE JOBS</span><span className="mc-value">{jobs.length}</span></div>
             <div className="metric-card"><span className="mc-label">PASS RATE</span><span className="mc-value">{candidates.length > 0 ? `${Math.round(completedCount / candidates.length * 100)}%` : "—"}</span></div>
           </div>
-          <div className="empty-state" style={{ marginTop: 20 }}>
-            <BarChart3 size={28} />
-            <p>Detailed analytics charts will be available when connected to the live API.</p>
+          <div className="analytics-grid">
+            <div className="analytics-card">
+              <div className="panel-title">
+                <h4>Status Breakdown</h4>
+                <p>{candidates.length} candidate(s)</p>
+              </div>
+              {statusBreakdown.length ? statusBreakdown.map((item) => (
+                <div className="analytics-bar-row" key={item.status}>
+                  <span>{item.status}</span>
+                  <div className="analytics-bar-track">
+                    <i style={{ width: `${Math.max(8, Math.round((item.count / Math.max(1, candidates.length)) * 100))}%` }} />
+                  </div>
+                  <strong>{item.count}</strong>
+                </div>
+              )) : <p className="hint-text">No candidate activity yet.</p>}
+            </div>
+
+            <div className="analytics-card">
+              <div className="panel-title">
+                <h4>Top Interview Scores</h4>
+                <p>{scoredCandidates.length} scored</p>
+              </div>
+              {topInterviewScores.length ? topInterviewScores.map((candidate, index) => (
+                <div className="analytics-rank-row" key={`${candidate.jobId}-${candidate.candidateId}`}>
+                  <span>{index + 1}</span>
+                  <div>
+                    <strong>{candidate.name}</strong>
+                    <p>{candidateJobTitle(candidate)}</p>
+                  </div>
+                  <strong>{candidate.latestResultScore}/100</strong>
+                </div>
+              )) : <p className="hint-text">No scored interviews yet.</p>}
+            </div>
+          </div>
+
+          <div className="analytics-grid">
+            <div className="analytics-card wide">
+              <div className="panel-title">
+                <h4>Job Performance</h4>
+                <p>Live AWS candidate data</p>
+              </div>
+              {jobAnalytics.length ? (
+                <div className="analytics-table-wrap">
+                  <table className="shortlist-table">
+                    <thead>
+                      <tr>
+                        <th>Job</th>
+                        <th>Total</th>
+                        <th>Scored</th>
+                        <th>Avg Score</th>
+                        <th>Pass Rate</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {jobAnalytics.map((item) => (
+                        <tr key={item.job.jobId}>
+                          <td>{item.job.title}</td>
+                          <td>{item.total}</td>
+                          <td>{item.scored}</td>
+                          <td>{item.avg === null ? "—" : `${item.avg}/100`}</td>
+                          <td>{item.passRate === null ? "—" : `${item.passRate}%`}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : <p className="hint-text">Create a job and add candidates to see job analytics.</p>}
+            </div>
+
+            <div className="analytics-card">
+              <div className="panel-title">
+                <h4>College Source</h4>
+                <p>Top sources</p>
+              </div>
+              {collegeAnalytics.length ? collegeAnalytics.map((item) => (
+                <div className="analytics-rank-row" key={item.college}>
+                  <span>{item.total}</span>
+                  <div>
+                    <strong>{item.college}</strong>
+                    <p>{item.scored ? `Avg ${Math.round(item.scoreTotal / item.scored)}/100` : "No scored interviews"}</p>
+                  </div>
+                </div>
+              )) : <p className="hint-text">No college metadata yet.</p>}
+            </div>
           </div>
         </section>
       )}

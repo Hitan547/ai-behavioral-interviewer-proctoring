@@ -303,6 +303,10 @@ export class ApiClient {
     const text = await response.text();
     const payload = text ? JSON.parse(text) : {};
     if (!response.ok) {
+      if (response.status === 401) {
+        this.auth.clearSession();
+        throw new Error("Your session expired. Please sign in again.");
+      }
       throw new Error(payload.error || `Request failed: ${response.status}`);
     }
     return payload as T;
