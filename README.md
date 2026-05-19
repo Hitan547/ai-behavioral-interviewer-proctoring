@@ -12,7 +12,7 @@ Talentryx AI helps recruiters run structured hiring drives: create jobs, analyze
   </a>
   <img alt="AWS Serverless" src="https://img.shields.io/badge/AWS-Serverless-FF9900?style=for-the-badge&logo=amazonaws&logoColor=white">
   <img alt="Human in the loop" src="https://img.shields.io/badge/Human--in--the--Loop-Decision%20Support-0F766E?style=for-the-badge">
-  <img alt="Status" src="https://img.shields.io/badge/Status-AWS--Verified%20MVP-2563EB?style=for-the-badge">
+  <img alt="Status" src="https://img.shields.io/badge/Status-Live%20AWS%20Pilot-2563EB?style=for-the-badge">
 </p>
 
 <p>
@@ -28,7 +28,7 @@ Talentryx AI helps recruiters run structured hiring drives: create jobs, analyze
   <img alt="Step Functions" src="https://img.shields.io/badge/Step%20Functions-Scoring-CC2264?style=flat-square&logo=awsstepfunctions&logoColor=white">
   <img alt="SAM" src="https://img.shields.io/badge/AWS%20SAM-IaC-232F3E?style=flat-square&logo=amazonaws&logoColor=white">
   <img alt="Groq" src="https://img.shields.io/badge/Groq-LLM%20%2B%20STT-F55036?style=flat-square">
-  <img alt="n8n" src="https://img.shields.io/badge/n8n-Invite%20Automation-EA4B71?style=flat-square&logo=n8n&logoColor=white">
+  <img alt="n8n" src="https://img.shields.io/badge/n8n-OTP%20%2B%20Invite%20Automation-EA4B71?style=flat-square&logo=n8n&logoColor=white">
   <img alt="Flask" src="https://img.shields.io/badge/Flask-Local%20API-000000?style=flat-square&logo=flask&logoColor=white">
   <img alt="FastAPI" src="https://img.shields.io/badge/FastAPI-Legacy%20Services-009688?style=flat-square&logo=fastapi&logoColor=white">
   <img alt="Streamlit" src="https://img.shields.io/badge/Streamlit-Legacy%20Prototype-FF4B4B?style=flat-square&logo=streamlit&logoColor=white">
@@ -58,7 +58,7 @@ The product is built as a human-in-the-loop decision-support platform. AI scores
 | Frontend | React, TypeScript, Vite, lucide-react, browser media APIs |
 | Backend | Python Lambda handlers, Flask local wrapper, repository/service layering |
 | AWS serverless | Cognito, API Gateway HTTP API, Lambda, DynamoDB, S3, Step Functions, SSM Parameter Store, CloudWatch, SAM |
-| AI and automation | Groq API for LLM/STT, n8n webhook invite automation |
+| AI and automation | Groq API for LLM/STT, n8n webhook automation for recruiter OTP and candidate invite email |
 | Reports and documents | PDF report generation, resume text extraction, S3 artifact storage |
 | Legacy prototype | Streamlit, FastAPI microservices, SQLite/PostgreSQL-compatible SQLAlchemy layer, Plotly, WebRTC |
 | Quality | GitHub Actions, pytest, Ruff, TypeScript build, SAM template validation |
@@ -73,7 +73,7 @@ The product is built as a human-in-the-loop decision-support platform. AI scores
 | AI assessment | Resume/JD-aware questions, transcription, STAR-style behavioral scoring, final recommendation |
 | Proctoring | Tab switch detection, fullscreen exits, copy/paste attempts, devtools attempts, face visibility and multi-face events |
 | Dashboard | Candidate status filters, final shortlist, reports, scorecards, proctoring risk, billing foundation |
-| Deployment direction | AWS serverless backend verified; public frontend hosting is the next production-demo step |
+| Deployment direction | AWS serverless backend and CloudFront-hosted frontend are live for pilot/demo use |
 
 ## SaaS Positioning
 
@@ -148,22 +148,28 @@ The active product is `serverless/`.
 Current verified state:
 
 - AWS backend stack is deployed and working through API Gateway, Lambda, DynamoDB, Cognito, S3, Step Functions, and SSM Parameter Store.
-- Local Vite frontend can run at `http://localhost:5173` while calling the deployed AWS backend.
-- Recruiter signup/login, job creation, candidate creation, invite flow, candidate interview, scoring, report retrieval, retest flow, and dashboard review have been smoke tested against AWS.
+- Public React frontend is deployed through S3 + CloudFront for HTTPS access.
+- Backend CORS and candidate invite links are configured for the CloudFront frontend URL.
+- Recruiter signup/login, recruiter OTP verification, job creation, candidate creation, invite flow, candidate interview, scoring, report retrieval, retest flow, analytics, billing foundation, and dashboard review have been smoke tested against AWS.
 - Groq is configured through SSM for question generation, transcription, resume analysis, and scoring.
-- n8n invite/result webhook parameters are configured through SSM; no webhook secrets are committed to the repo.
+- n8n webhook parameters are configured through SSM for recruiter signup OTP and candidate invite email delivery; no webhook secrets are committed to the repo.
 - Frontend production build and serverless backend tests are passing.
 
-Current demo mode:
+Current live pilot mode:
 
 ```text
-React/Vite frontend on localhost:5173
+React/Vite frontend on S3 + CloudFront
         |
         v
 AWS API Gateway / Lambda / DynamoDB / Cognito / S3 / Step Functions
+        |
+        v
+n8n + Gmail for OTP and invite email automation
 ```
 
-This is a valid AWS-backend demo. The next step for a public demo is hosting the frontend on S3 + CloudFront and redeploying the backend with `FrontendUrl` set to that public URL.
+The local Vite frontend can still run at `http://localhost:5173` for development, but the current pilot path uses the public CloudFront frontend connected to the deployed AWS backend.
+
+Remaining production-facing steps are company-owned email/webhook resources, custom domain mapping, final legal/security review, and production monitoring policies.
 
 The `legacy-streamlit/` folder is kept only as a reference for the original prototype, older dashboard ideas, and previous local demo behavior.
 
@@ -198,6 +204,7 @@ flowchart LR
 
 Recruiters can:
 
+- Create an account through email OTP verification before accessing the dashboard.
 - Create job postings with title, description, deadline, open positions, and pass threshold.
 - Upload one or more resumes for a job.
 - Analyze candidates against the JD.
@@ -221,6 +228,19 @@ Candidates can:
 - See completion confirmation after submission.
 
 The candidate route is intentionally isolated from recruiter analytics, scoring internals, billing, and dashboard data.
+
+## Authentication and Email Automation
+
+Talentryx AI currently uses Cognito-backed recruiter authentication with an application-level OTP verification step before recruiter account creation.
+
+Current email automation:
+
+- Recruiter signup OTP is sent through an n8n production webhook connected to Gmail.
+- Candidate interview credentials are sent through the configured n8n invite workflow.
+- The deployed backend reads webhook URLs from SSM Parameter Store at runtime.
+- The repository does not commit real n8n webhook URLs, Gmail credentials, or API keys.
+
+For production ownership, these email workflows should run under company-managed n8n and company-owned sender credentials. AWS SES can replace n8n/Gmail later if leadership approves it.
 
 ## AI Assessment
 
@@ -303,7 +323,7 @@ flowchart TB
     subgraph External["External Services"]
         SSM["SSM Parameter Store<br/>secret names and config"]
         GROQ["Groq API<br/>LLM + transcription"]
-        N8N["n8n Webhook<br/>candidate invite email"]
+        N8N["n8n Webhook<br/>signup OTP + candidate invite email"]
         CW["CloudWatch<br/>logs and metrics"]
     end
 
@@ -458,6 +478,8 @@ serverless/
 
 | Capability | Path Pattern |
 | --- | --- |
+| Recruiter signup OTP request | `/auth/recruiter-signup/request-otp` |
+| Recruiter signup OTP verification | `/auth/recruiter-signup/verify-otp` |
 | Create/list jobs | `/jobs` |
 | Create/list candidates | `/jobs/{jobId}/candidates` |
 | Prepare interview | `/jobs/{jobId}/candidates/{candidateId}/prepare-interview` |
@@ -574,14 +596,15 @@ Recent verification:
 
 ## Deployment Readiness
 
-The AWS backend has been deployed and verified for a dev/pilot environment. The current public-demo gap is frontend hosting.
+The AWS backend and public frontend have been deployed and verified for a dev/pilot environment.
 
-Current backend deployment uses:
+Current deployment uses:
 
 - SAM / CloudFormation stack for API, auth, storage, and workflow resources.
 - SSM Parameter Store for Groq, n8n, and billing provider config references.
-- n8n webhook for candidate invite delivery.
-- Local Vite frontend connected to the deployed AWS backend for the current demo.
+- n8n webhook for recruiter OTP and candidate invite delivery.
+- S3 + CloudFront for the public React frontend.
+- Cognito for recruiter identity, with an OTP gate before account creation.
 
 Before a fresh AWS deployment:
 
@@ -594,13 +617,21 @@ Before a fresh AWS deployment:
 7. Connect frontend environment values from stack outputs.
 8. Smoke test recruiter signup/login, job creation, invites, candidate login, interview, scoring, and report retrieval.
 
-For a public demo:
+For a public frontend deployment:
 
 1. Build the frontend with the deployed API/Cognito values.
 2. Upload `serverless/frontend/dist` to an approved S3 static hosting bucket.
 3. Put CloudFront in front of the S3 bucket for HTTPS.
 4. Redeploy the backend with `FrontendUrl=<CloudFront-or-custom-domain URL>`.
 5. Re-test invite links, CORS, candidate login, interview completion, and report retrieval from the public URL.
+
+Current production-facing work left:
+
+- Map a company custom domain such as `interview.digitransolutions.in` to CloudFront.
+- Move n8n/Gmail ownership to company-controlled accounts.
+- Finalize branded OTP and candidate invite email templates.
+- Add CloudWatch alarms and operational runbooks.
+- Complete final legal/security review before paid customer use.
 
 See [serverless/DEPLOYMENT_CHECKLIST.md](serverless/DEPLOYMENT_CHECKLIST.md).
 
@@ -647,10 +678,10 @@ Important: production use still requires final legal review, data retention deci
 Near term:
 
 - Keep CI green.
-- Host the frontend on S3 + CloudFront for a public demo.
-- Redeploy the backend with `FrontendUrl` set to the public frontend URL.
-- Run one final public URL smoke test with a new recruiter, job, candidate invite, interview, scoring run, and report.
-- Finalize n8n email template with Talentryx AI branding.
+- Keep the S3 + CloudFront public frontend in sync with the latest production build.
+- Map CloudFront to the company custom domain.
+- Run one final public URL smoke test with a new recruiter OTP signup, job, candidate invite, interview, scoring run, and report.
+- Finalize n8n OTP and candidate invite templates with Talentryx AI branding.
 - Add clearer audit/retest visibility in the recruiter dashboard.
 
 Pilot hardening:
