@@ -91,9 +91,11 @@ export function LoginPage({ auth }: Props) {
     setStatus("");
     setStatusType("error");
     try {
+      const normalizedPassword = password.trim();
+      const normalizedConfirmPassword = confirmPassword.trim();
       if (!orgName.trim()) throw new Error("Company/team name is required.");
       if (!email.trim()) throw new Error("Work email is required.");
-      if (password !== confirmPassword) throw new Error("Passwords do not match.");
+      if (normalizedPassword !== normalizedConfirmPassword) throw new Error("Passwords do not match.");
       const apiBaseUrl = apiBaseForLocalDemo();
       if (!isLocalApi(apiBaseUrl)) {
         if (!auth.userPoolId || !auth.clientId) {
@@ -101,7 +103,7 @@ export function LoginPage({ auth }: Props) {
         }
         const api = new ApiClient({ ...auth, apiBaseUrl });
         if (!signupOtpSent) {
-          await api.requestRecruiterSignupOtp({ email, password, orgName });
+          await api.requestRecruiterSignupOtp({ email, password: normalizedPassword, orgName });
           setSignupOtpSent(true);
           setStatusType("success");
           setStatus("OTP sent to your email. Enter the 6-digit code to finish account creation.");
@@ -110,11 +112,11 @@ export function LoginPage({ auth }: Props) {
         if (!signupOtp.trim()) {
           throw new Error("Enter the OTP sent to your email.");
         }
-        const created = await api.verifyRecruiterSignupOtp({ email, password, orgName, otp: signupOtp });
+        const created = await api.verifyRecruiterSignupOtp({ email, password: normalizedPassword, orgName, otp: signupOtp });
         const result = await signInWithCognito(
           { userPoolId: auth.userPoolId, clientId: auth.clientId },
           email,
-          password,
+          normalizedPassword,
         );
         auth.setAccessToken(result.accessToken);
         auth.setIdToken(result.idToken);
@@ -130,7 +132,7 @@ export function LoginPage({ auth }: Props) {
         return;
       }
       const api = new ApiClient({ ...auth, apiBaseUrl });
-      const result = await api.recruiterSignup({ email, password, orgName });
+      const result = await api.recruiterSignup({ email, password: normalizedPassword, orgName });
       applyRecruiterSession(result);
       setPassword("");
       setConfirmPassword("");
