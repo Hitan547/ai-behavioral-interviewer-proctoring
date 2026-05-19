@@ -7,7 +7,7 @@ SERVERLESS_BACKEND = Path(__file__).resolve().parents[1] / "serverless" / "backe
 sys.path.insert(0, str(SERVERLESS_BACKEND))
 os.environ["ENVIRONMENT"] = "test"
 
-from handlers import candidates
+from handlers import analyse_resumes, candidates
 from repositories.candidates_repository import CandidatesRepository
 
 
@@ -166,3 +166,8 @@ def test_create_candidate_requires_job_path(monkeypatch):
 
     assert response["statusCode"] == 400
     assert "jobId" in json.loads(response["body"])["error"]
+
+
+def test_resume_email_extraction_requires_clean_boundary():
+    assert analyse_resumes._extract_email_from_text("Email: hitank2004@gmail.com") == "hitank2004@gmail.com"
+    assert analyse_resumes._extract_email_from_text("pehitank2004@gmail.com") == "hitank2004@gmail.com"

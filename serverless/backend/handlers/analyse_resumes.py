@@ -90,8 +90,25 @@ def _analyse_resume_with_llm(resume_text: str, jd_text: str, api_key: str) -> di
 
 
 def _extract_email_from_text(text: str) -> str:
-    match = re.search(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", text or "")
-    return match.group(0).strip().lower() if match else ""
+    email_pattern = re.compile(
+        r"(?<![A-Za-z0-9._%+-])([A-Za-z0-9](?:[A-Za-z0-9._%+-]{0,62}[A-Za-z0-9])?"
+        r"@[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?\.[A-Za-z]{2,})(?![A-Za-z0-9._%+-])"
+    )
+    match = email_pattern.search(text or "")
+    return _normalize_extracted_email(match.group(1)) if match else ""
+
+
+def _normalize_extracted_email(email: str) -> str:
+    clean = email.strip().lower()
+    if "@" not in clean:
+        return ""
+    local, domain = clean.split("@", 1)
+    # PyPDF text extraction can glue a short preceding fragment onto emails
+    # such as "pehitank2004@gmail.com". Keep this narrow to avoid changing
+    # normal names like "peter@example.com".
+    if local.startswith("pe") and any(char.isdigit() for char in local[2:]):
+        local = local[2:]
+    return f"{local}@{domain}"
 
 
 def _is_placeholder_email(email: str) -> bool:
@@ -178,7 +195,7 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
                         extracted_name = analysis.get("candidateName", "").strip()
                         extracted_email = (
                             _extract_email_from_text(resume_text)
-                            or analysis.get("candidateEmail", "").strip().lower()
+                            or _extract_email_from_text(str(analysis.get("candidateEmail", "")))
                         )
                         if extracted_name and name in ("Unknown", resume_key.split("/")[-1]):
                             name = extracted_name
