@@ -168,14 +168,36 @@ Resources:
             Effect: Allow
             Action:
               - cognito-idp:AdminCreateUser
+              - cognito-idp:AdminGetUser
               - cognito-idp:AdminSetUserPassword
             Resource: !Sub arn:${AWS::Partition}:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/${UserPool}
+        - Statement:
+            Effect: Allow
+            Action:
+              - ssm:GetParameter
+            Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${N8nInviteWebhookParameterName}
       Events:
         RecruiterSignup:
           Type: HttpApi
           Properties:
             ApiId: !Ref HttpApi
             Path: /auth/recruiter-signup
+            Method: POST
+            Auth:
+              Authorizer: NONE
+        RecruiterSignupRequestOtp:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /auth/recruiter-signup/request-otp
+            Method: POST
+            Auth:
+              Authorizer: NONE
+        RecruiterSignupVerifyOtp:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /auth/recruiter-signup/verify-otp
             Method: POST
             Auth:
               Authorizer: NONE

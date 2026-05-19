@@ -26,6 +26,46 @@ export class ApiClient {
     };
   }
 
+  async requestRecruiterSignupOtp(input: { email: string; password: string; orgName: string }) {
+    const baseUrl = this.auth.apiBaseUrl || "http://localhost:3001";
+    const response = await fetch(`${baseUrl.replace(/\/$/, "")}/auth/recruiter-signup/request-otp`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    });
+    const text = await response.text();
+    const payload = text ? JSON.parse(text) : {};
+    if (!response.ok) {
+      throw new Error(payload.error || `OTP request failed: ${response.status}`);
+    }
+    return payload as {
+      message: string;
+      email: string;
+      expiresInSeconds: number;
+    };
+  }
+
+  async verifyRecruiterSignupOtp(input: { email: string; password: string; orgName: string; otp: string }) {
+    const baseUrl = this.auth.apiBaseUrl || "http://localhost:3001";
+    const response = await fetch(`${baseUrl.replace(/\/$/, "")}/auth/recruiter-signup/verify-otp`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    });
+    const text = await response.text();
+    const payload = text ? JSON.parse(text) : {};
+    if (!response.ok) {
+      throw new Error(payload.error || `OTP verification failed: ${response.status}`);
+    }
+    return payload as {
+      orgId: string;
+      role: "recruiter";
+      username: string;
+      orgName: string;
+      message: string;
+    };
+  }
+
   async recruiterLogin(input: { email: string; password: string }) {
     const baseUrl = this.auth.apiBaseUrl || "http://localhost:3001";
     const response = await fetch(`${baseUrl.replace(/\/$/, "")}/auth/recruiter-login`, {

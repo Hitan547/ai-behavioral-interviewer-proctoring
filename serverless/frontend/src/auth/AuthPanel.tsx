@@ -21,6 +21,8 @@ export function LoginPage({ auth }: Props) {
   // Signup fields
   const [orgName, setOrgName] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
+  const [signupOtp, setSignupOtp] = useState("");
+  const [signupOtpSent, setSignupOtpSent] = useState(false);
 
   function apiBaseForLocalDemo() {
     const value = auth.apiBaseUrl || "http://localhost:3001";
@@ -98,7 +100,17 @@ export function LoginPage({ auth }: Props) {
           throw new Error("Authentication is not configured. Please contact the administrator.");
         }
         const api = new ApiClient({ ...auth, apiBaseUrl });
-        const created = await api.recruiterSignup({ email, password, orgName });
+        if (!signupOtpSent) {
+          await api.requestRecruiterSignupOtp({ email, password, orgName });
+          setSignupOtpSent(true);
+          setStatusType("success");
+          setStatus("OTP sent to your email. Enter the 6-digit code to finish account creation.");
+          return;
+        }
+        if (!signupOtp.trim()) {
+          throw new Error("Enter the OTP sent to your email.");
+        }
+        const created = await api.verifyRecruiterSignupOtp({ email, password, orgName, otp: signupOtp });
         const result = await signInWithCognito(
           { userPoolId: auth.userPoolId, clientId: auth.clientId },
           email,
@@ -111,8 +123,10 @@ export function LoginPage({ auth }: Props) {
         auth.setRole(claimsValue(result.claims, ["custom:role", "role"], "recruiter"));
         setPassword("");
         setConfirmPassword("");
+        setSignupOtp("");
+        setSignupOtpSent(false);
         setStatusType("success");
-        setStatus("Recruiter account created and signed in.");
+        setStatus("Email verified. Recruiter account created and signed in.");
         return;
       }
       const api = new ApiClient({ ...auth, apiBaseUrl });
@@ -120,6 +134,8 @@ export function LoginPage({ auth }: Props) {
       applyRecruiterSession(result);
       setPassword("");
       setConfirmPassword("");
+      setSignupOtp("");
+      setSignupOtpSent(false);
       setStatusType("success");
       setStatus("Recruiter account created and signed in to local demo.");
     } catch (error) {
@@ -193,6 +209,12 @@ export function LoginPage({ auth }: Props) {
     setStatus("AWS password reset is handled by Cognito. Use the configured Cognito reset flow after deployment.");
   }
 
+  function resetSignupOtp() {
+    setSignupOtp("");
+    setSignupOtpSent(false);
+    setStatus("");
+  }
+
   return (
     <div className="login-page">
       <div className="login-card">
@@ -261,30 +283,57 @@ export function LoginPage({ auth }: Props) {
             </div>
             <label>
               <span>Company/Team Name</span>
-              <input value={orgName} placeholder="e.g., Acme Corp" onChange={(e) => setOrgName(e.target.value)} />
+              <input
+                value={orgName}
+                placeholder="e.g., Acme Corp"
+                disabled={signupOtpSent}
+                onChange={(e) => setOrgName(e.target.value)}
+              />
             </label>
             <label>
               <span>Work Email</span>
-              <input value={email} placeholder="you@company.com" onChange={(e) => setEmail(e.target.value)} />
-            </label>
-            <label>
-              <span>Password</span>
               <input
-                type="password"
-                value={password}
-                placeholder="min 8 chars, must include a number"
-                onChange={(e) => setPassword(e.target.value)}
+                value={email}
+                placeholder="you@company.com"
+                disabled={signupOtpSent}
+                onChange={(e) => setEmail(e.target.value)}
               />
             </label>
-            <label>
-              <span>Confirm Password</span>
-              <input
-                type="password"
-                value={confirmPassword}
-                placeholder="repeat password"
-                onChange={(e) => setConfirmPassword(e.target.value)}
-              />
-            </label>
+            {!signupOtpSent && (
+              <>
+                <label>
+                  <span>Password</span>
+                  <input
+                    type="password"
+                    value={password}
+                    placeholder="min 8 chars, must include a number"
+                    onChange={(e) => setPassword(e.target.value)}
+                  />
+                </label>
+                <label>
+                  <span>Confirm Password</span>
+                  <input
+                    type="password"
+                    value={confirmPassword}
+                    placeholder="repeat password"
+                    onChange={(e) => setConfirmPassword(e.target.value)}
+                  />
+                </label>
+              </>
+            )}
+            {signupOtpSent && (
+              <label>
+                <span>6-digit OTP</span>
+                <input
+                  value={signupOtp}
+                  placeholder="123456"
+                  inputMode="numeric"
+                  maxLength={6}
+                  onChange={(e) => setSignupOtp(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                  onKeyDown={(e) => e.key === "Enter" && signUpRecruiter()}
+                />
+              </label>
+            )}
             <button
               className="login-submit"
               onClick={signUpRecruiter}
